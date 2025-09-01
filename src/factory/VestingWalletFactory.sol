@@ -33,7 +33,7 @@ contract VestingWalletFactory {
     }
 
     /// @notice Restrict access to DAO-only functions using a modifier
-    address public dao = 0x000000000000000000000000000000000000dEaD;
+    address public dao = 0x003a7E96B48Ee318DE5200Fcc9504480643237f3;
 
     /// @notice Registry storage
     mapping(address => address[]) internal userVestings;
@@ -69,14 +69,19 @@ contract VestingWalletFactory {
     /// @param start The start time of the vesting, time where actual vesting period initiates
     /// @param duration The duration of the vesting, time over which tokens will be vested
     /// @param cliffDuration The cliff duration of the vesting, where cliff is nothing but how long after the tokens will be received back from the DAO
+    /// @param revokeAllowed Whether revoke is allowed for this vesting wallet
     /// @return The address of the newly created vesting wallet
 
-    function createVestingWallet(address beneficiary, uint64 start, uint64 duration, uint64 cliffDuration)
-        external
-        returns (address)
-    {
+    function createVestingWallet(
+        address beneficiary,
+        uint64 start,
+        uint64 duration,
+        uint64 cliffDuration,
+        bool revokeAllowed
+    ) external returns (address) {
         // Deploy wallet with beneficiary as owner, DAO as special role for revoke
-        VestingWalletBlokc wallet = new VestingWalletBlokc(dao, beneficiary, start, duration, cliffDuration);
+        VestingWalletBlokc wallet =
+            new VestingWalletBlokc(dao, beneficiary, start, duration, cliffDuration, revokeAllowed);
         userVestings[beneficiary].push(address(wallet));
         allVestings.push(address(wallet));
         emit VestingWalletCreated(address(wallet), beneficiary);

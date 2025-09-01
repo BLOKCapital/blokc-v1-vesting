@@ -34,14 +34,12 @@ contract VestingWalletBlokc is VestingWalletCliff {
 
     address private _beneficiary;
 
-    // Flag to control whether revoke is allowed for this wallet
-    bool public revokeAllowed;
+    // Immutable flag to control whether revoke is allowed for this wallet
+    bool public immutable revokeAllowed;
 
     /// @notice DAO can set whether revoke is allowed (to be triggered after vote off-chain)
 
-    function setRevokeAllowed(bool allowed) external onlyDAO {
-        revokeAllowed = allowed;
-    }
+    /// @notice revokeAllowed is now immutable and set at construction
 
     /// @notice Only DAO can call certain functions, modifier allows access specifically to DAO
     /// @dev This modifier is used for all functions that should be restricted to the DAO
@@ -57,7 +55,14 @@ contract VestingWalletBlokc is VestingWalletCliff {
     /// @param startTimestamp The start time of the vesting
     /// @param durationSeconds The duration of the vesting, in solidity the duration standard is calculated in seconds
 
-    constructor(address dao_, address beneficiary_, uint64 startTimestamp, uint64 durationSeconds, uint64 cliffDuration)
+    constructor(
+        address dao_,
+        address beneficiary_,
+        uint64 startTimestamp,
+        uint64 durationSeconds,
+        uint64 cliffDuration,
+        bool revokeAllowed_
+    )
         /// @notice Initializes the vesting wallet that is inherited from oppenzeppelin standards with certain params
         VestingWallet(beneficiary_, startTimestamp, durationSeconds)
         /// @notice Initializes the cliff duration for the vesting wallet
@@ -65,6 +70,7 @@ contract VestingWalletBlokc is VestingWalletCliff {
     {
         dao = dao_;
         _beneficiary = beneficiary_;
+        revokeAllowed = revokeAllowed_;
     }
 
     /// @notice Returns the beneficiary address and essentially used for testing purposes
@@ -93,6 +99,7 @@ contract VestingWalletBlokc is VestingWalletCliff {
             IERC20(token).transfer(dao, unvestedAmount);
         }
         emit VestingRevoked(token, dao, unvestedAmount);
-        revokeAllowed = false; // Reset after revoke
+
+        // revokeAllowed is immutable, cannot reset
     }
 }
