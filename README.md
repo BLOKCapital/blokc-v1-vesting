@@ -1,66 +1,28 @@
-## Foundry
+# Vesting V1
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+Cliff-plus-linear token vesting system with DAO oversight, built on OpenZeppelin V5.
 
-Foundry consists of:
+## Contracts
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+- **VestingWalletFactory**: Deploys and registers vesting wallets. Single source of truth for the active DAO address. 2-step DAO rotation.
+- **VestingWalletBlokc**: Per-beneficiary vesting wallet. Extends OZ `VestingWallet` + `VestingWalletCliff` with DAO-gated revoke, pausable releases, ownership rescue, and governance delegation.
 
-## Documentation
-
-https://book.getfoundry.sh/
-
-## Usage
-
-### Build
+## Build
 
 ```shell
-$ forge build
+forge build
 ```
 
-### Test
+## Test
 
 ```shell
-$ forge test
+forge test
 ```
 
-### Format
+## Deploy
+
+add DAO_ADDRESS=0x... in DeployAll.s.sol
 
 ```shell
-$ forge fmt
-```
-
-### Gas Snapshots
-
-```shell
-$ forge snapshot
-```
-
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
+forge script script/DeployAll.s.sol --rpc-url <rpc_url> --broadcast
 ```

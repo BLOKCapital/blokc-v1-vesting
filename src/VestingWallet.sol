@@ -39,7 +39,7 @@ interface IVestingWalletFactory {
 /// @author BLOK Capital DAO
 /// @notice Cliff-plus-linear vesting wallet with DAO oversight. Built on top of
 ///         {VestingWallet} and {VestingWalletCliff} from OpenZeppelin. In addition to
-///         the base vesting behaviour it supports:
+///         the base vesting behavior it supports:
 ///
 ///         * DAO-initiated revoke of unvested ERC20 / ETH (behind an immutable
 ///           `revokeAllowed` flag set at construction),
@@ -107,7 +107,7 @@ contract VestingWalletBlokc is VestingWalletCliff, ReentrancyGuard, Pausable {
     error ZeroAddress();
 
     /// @notice `renounceOwnership` is permanently disabled to prevent the vested
-    ///         funds from being orphaned with no reachable owner.
+    /// funds from being orphaned with no reachable owner.
     error RenounceDisabled();
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -149,7 +149,7 @@ contract VestingWalletBlokc is VestingWalletCliff, ReentrancyGuard, Pausable {
     /// @dev Reads DAO live via `factory.dao()` so that key rotations at the factory
     ///      level immediately update every deployed wallet's authorisation set.
     modifier onlyDAO() {
-        if (msg.sender != factory.dao()) revert NotDAO();
+        _checkDAO();
         _;
     }
 
@@ -345,7 +345,15 @@ contract VestingWalletBlokc is VestingWalletCliff, ReentrancyGuard, Pausable {
     /// @dev Renouncing would set the owner to the zero address and make every
     ///future {release} call transfer to the zero address — effectively
     ///burning the vested funds. Disallowed by design.
-    function renounceOwnership() public override onlyDAO {
+    function renounceOwnership() public view override onlyDAO {
         revert RenounceDisabled();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Internals
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function _checkDAO() internal view {
+        if (msg.sender != factory.dao()) revert NotDAO();
     }
 }

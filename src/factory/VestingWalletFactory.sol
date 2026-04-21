@@ -42,7 +42,6 @@ contract VestingWalletFactory {
     address public dao;
 
     /// @notice Candidate DAO address awaiting acceptance (2-step rotation).
-   
     address public pendingDao;
 
     /// @notice Append-only list of every wallet the factory has deployed.
@@ -68,6 +67,9 @@ contract VestingWalletFactory {
     /// @notice Vesting duration cannot be zero.
     error ZeroDuration();
 
+    /// @notice Vesting start timestamp cannot be zero.
+    error ZeroStart();
+
     // ─────────────────────────────────────────────────────────────────────────
     // Events
     // ─────────────────────────────────────────────────────────────────────────
@@ -81,6 +83,10 @@ contract VestingWalletFactory {
     /// @param oldDao DAO address prior to the transfer.
     /// @param newDao New authoritative DAO address.
     event DAOTransferred(address indexed oldDao, address indexed newDao);
+
+    /// @notice Emitted when a pending DAO rotation is cancelled before acceptance.
+    /// @param cancelledDao The candidate DAO address that was pending.
+    event DAOTransferCancelled(address indexed cancelledDao);
 
     /// @notice Emitted when a new vesting wallet is created.These include params for indexing and logging.
     /// @param wallet Address of the newly deployed {VestingWalletBlokc}.
@@ -104,7 +110,7 @@ contract VestingWalletFactory {
 
     /// @notice Restricts the call to the current DAO address.
     modifier onlyDAO() {
-        if (msg.sender != dao) revert NotDAO();
+        _checkDAO();
         _;
     }
 
@@ -150,7 +156,9 @@ contract VestingWalletFactory {
     /// @dev Useful when the intended candidate no longer applies (e.g. wrong address
     ///      queued). Only callable by the current DAO.
     function cancelDAOTransfer() external onlyDAO {
+        address cancelled = pendingDao;
         pendingDao = address(0);
+        emit DAOTransferCancelled(cancelled);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -174,6 +182,7 @@ contract VestingWalletFactory {
         bool revokeAllowed
     ) external onlyDAO returns (address) {
         if (beneficiary == address(0)) revert ZeroAddress();
+        if (start == 0) revert ZeroStart();
         if (duration == 0) revert ZeroDuration();
 
         VestingWalletBlokc wallet =
@@ -241,17 +250,25 @@ contract VestingWalletFactory {
         return _slice(_userVestings[user], offset, limit);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Internals
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function _checkDAO() internal view {
+        if (msg.sender != dao) revert NotDAO();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Private functions
+    // ─────────────────────────────────────────────────────────────────────────
+
     /// @dev Shared slicing helper. Returns an empty array if `offset` is past the
     ///end; otherwise returns up to `limit` elements starting at `offset`.
     /// @param arr Storage array to slice.
     /// @param offset Index to start at.
     /// @param limit Maximum number of elements to copy.
     /// @return page Memory copy of the requested slice.
-    function _slice(address[] storage arr, uint256 offset, uint256 limit)
-        private
-        view
-        returns (address[] memory page)
-    {
+    function _slice(address[] storage arr, uint256 offset, uint256 limit) private view returns (address[] memory page) {
         uint256 total = arr.length;
         if (offset >= total) return new address[](0);
         uint256 end = offset + limit;

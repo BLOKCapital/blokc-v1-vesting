@@ -9,13 +9,13 @@ pragma solidity 0.8.24;
 
 ################################################################################*/
 
-import "forge-std/Script.sol";
+import {Script, console} from "forge-std/Script.sol";
 import {VestingWalletFactory} from "../src/factory/VestingWalletFactory.sol";
 
 /// @title DeployAll
 /// @author BLOK Capital DAO
 /// @notice Forge deployment script for the vesting system.
-/// 
+///
 contract DeployAll is Script {
     /// @notice Deploy the factory with the DAO read from the `DAO_ADDRESS` env var.
     /// @return factory The deployed {VestingWalletFactory} instance.
@@ -24,5 +24,7 @@ contract DeployAll is Script {
         vm.startBroadcast();
         factory = new VestingWalletFactory(dao);
         vm.stopBroadcast();
+        console.log("Factory deployed at:", address(factory));
+        console.log("DAO set to:", dao);
     }
 }
