@@ -1,44 +1,28 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.24;
 
 /*###############################################################################
 
-    @title Vesting Wallet Factory deployment
+    @title Vesting System Deployment Script
     @author BLOK Capital DAO
-    @notice This contract implements logic for deploying Vesting Wallet Factory
-
-    ▗▄▄▖ ▗▖    ▗▄▖ ▗▖ ▗▖     ▗▄▄▖ ▗▄▖ ▗▄▄▖▗▄▄▄▖▗▄▄▄▖▗▄▖ ▗▖       ▗▄▄▄  ▗▄▖  ▗▄▖ 
-    ▐▌ ▐▌▐▌   ▐▌ ▐▌▐▌▗▞▘    ▐▌   ▐▌ ▐▌▐▌ ▐▌ █    █ ▐▌ ▐▌▐▌       ▐▌  █▐▌ ▐▌▐▌ ▐▌
-    ▐▛▀▚▖▐▌   ▐▌ ▐▌▐▛▚▖     ▐▌   ▐▛▀▜▌▐▛▀▘  █    █ ▐▛▀▜▌▐▌       ▐▌  █▐▛▀▜▌▐▌ ▐▌
-    ▐▙▄▞▘▐▙▄▄▖▝▚▄▞▘▐▌ ▐▌    ▝▚▄▄▖▐▌ ▐▌▐▌  ▗▄█▄▖  █ ▐▌ ▐▌▐▙▄▄▖    ▐▙▄▄▀▐▌ ▐▌▝▚▄▞▘
-
+    @notice Deploys VestingWalletFactory with the DAO supplied via the DAO_ADDRESS env var.
 
 ################################################################################*/
 
-/**
- * @title Vesting System Deployment Script
- * @author BLOK Capital DAO
- * @notice Deploys VestingWalletFactory, VestingWalletManager, and example VestingWallet
- */
 import "forge-std/Script.sol";
-import "../src/factory/VestingWalletFactory.sol";
-// import "../src/factory/VestingWalletManager.sol";
-import "../src/VestingWallet.sol";
+import {VestingWalletFactory} from "../src/factory/VestingWalletFactory.sol";
 
+/// @title DeployAll
+/// @author BLOK Capital DAO
+/// @notice Forge deployment script for the vesting system.
+/// 
 contract DeployAll is Script {
-    function run() external {
+    /// @notice Deploy the factory with the DAO read from the `DAO_ADDRESS` env var.
+    /// @return factory The deployed {VestingWalletFactory} instance.
+    function run() external returns (VestingWalletFactory factory) {
+        address dao = vm.envAddress("DAO_ADDRESS");
         vm.startBroadcast();
-
-        // Deploy VestingWalletFactory
-        VestingWalletFactory factory = new VestingWalletFactory();
-
-        // Example: Deploy a VestingWallet (replace with actual constructor params)
-        // address beneficiary = 0x0000000000000000000000000000000000000000;
-        // uint64 start = uint64(block.timestamp);
-        // uint64 duration = 365 days;
-        // address token = 0x0000000000000000000000000000000000000000;
-        // VestingWallet wallet = new VestingWallet(beneficiary, start, duration, token);
-
+        factory = new VestingWalletFactory(dao);
         vm.stopBroadcast();
     }
 }
