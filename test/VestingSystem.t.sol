@@ -28,9 +28,12 @@ contract VestingSystemTest is Test {
 
     bytes32 constant PROPOSAL = keccak256("proposal/42");
 
+    VestingWalletBlokc implementation;
+
     function setUp() public {
         start = uint64(block.timestamp + 1 days);
-        factory = new VestingWalletFactory(DAO);
+        implementation = new VestingWalletBlokc();
+        factory = new VestingWalletFactory(address(implementation), DAO);
     }
 
     // -----------------------------
@@ -87,7 +90,24 @@ contract VestingSystemTest is Test {
 
     function test_factory_constructor_rejectsZeroDAO() public {
         vm.expectRevert(VestingWalletFactory.ZeroAddress.selector);
-        new VestingWalletFactory(address(0));
+        new VestingWalletFactory(address(implementation), address(0));
+    }
+
+    function test_factory_constructor_rejectsZeroImpl() public {
+        vm.expectRevert(VestingWalletFactory.ZeroAddress.selector);
+        new VestingWalletFactory(address(0), DAO);
+    }
+
+    function test_implementation_initializeIsDisabled() public {
+        // The implementation itself must not be initializable — only its clones are.
+        vm.expectRevert();
+        implementation.initialize(address(factory), BENEFICIARY, start, duration, cliff, true);
+    }
+
+    function test_clone_initializeIsSingleUse() public {
+        VestingWalletBlokc wallet = _createWallet(true);
+        vm.expectRevert();
+        wallet.initialize(address(factory), BENEFICIARY, start, duration, cliff, true);
     }
 
     // -----------------------------
