@@ -77,6 +77,9 @@ contract VestingWalletFactory {
     /// @notice Vesting duration cannot be zero.
     error ZeroDuration();
 
+    /// @notice Vesting start timestamp cannot be zero.
+    error ZeroStart();
+
     // ─────────────────────────────────────────────────────────────────────────
     // Events
     // ─────────────────────────────────────────────────────────────────────────
@@ -114,7 +117,7 @@ contract VestingWalletFactory {
 
     /// @notice Restricts the call to the current DAO address.
     modifier onlyDAO() {
-        if (msg.sender != dao) revert NotDAO();
+        _checkDAO();
         _;
     }
 
@@ -122,7 +125,7 @@ contract VestingWalletFactory {
     // Construction
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// @notice Initialise the factory with an implementation and a DAO address.
+    /// @notice Initialize the factory with an implementation and a DAO address.
     /// @param implementation_ Address of the deployed {VestingWalletBlokc} logic
     ///        contract. Must be non-zero and must have its initializers disabled
     ///        (the {VestingWalletBlokc} constructor does this).
@@ -144,7 +147,7 @@ contract VestingWalletFactory {
         emit DAOTransferStarted(dao, newDAO);
     }
 
-    /// @notice Finalise DAO rotation. Called by the pending DAO.
+    /// @notice Finalize DAO rotation. Called by the pending DAO.
     function acceptDAOTransfer() external {
         if (msg.sender != pendingDao) revert NotPendingDAO();
         address old = dao;
@@ -184,31 +187,6 @@ contract VestingWalletFactory {
 
         wallet = implementation.clone();
         _initializeAndRegister(wallet, beneficiary, start, duration, cliffDuration, revokeAllowed, bytes32(0));
-    }
-
-    /// @notice Deploy a new vesting wallet clone at a deterministic CREATE2 address.
-    /// @dev Lets the DAO pre-fund a wallet before it is actually deployed. Reverts
-    ///      if the target address has already been deployed with the same salt.
-    /// @param beneficiary Initial wallet owner. Must be non-zero.
-    /// @param start Vesting start timestamp (unix seconds).
-    /// @param duration Total vesting duration in seconds. Must be > 0.
-    /// @param cliffDuration Cliff duration in seconds, measured from `start`.
-    /// @param revokeAllowed Whether the DAO may revoke unvested assets.
-    /// @param salt CREATE2 salt. Collisions with prior deployments revert.
-    /// @return wallet The address of the newly deployed clone.
-    function createVestingWalletDeterministic(
-        address beneficiary,
-        uint64 start,
-        uint64 duration,
-        uint64 cliffDuration,
-        bool revokeAllowed,
-        bytes32 salt
-    ) external onlyDAO returns (address wallet) {
-        if (beneficiary == address(0)) revert ZeroAddress();
-        if (duration == 0) revert ZeroDuration();
-
-        wallet = implementation.cloneDeterministic(salt);
-        _initializeAndRegister(wallet, beneficiary, start, duration, cliffDuration, revokeAllowed, salt);
     }
 
     /// @notice Predict the address a {createVestingWalletDeterministic} call with
@@ -275,6 +253,18 @@ contract VestingWalletFactory {
     {
         return _slice(_userVestings[user], offset, limit);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Internals
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function _checkDAO() internal view {
+        if (msg.sender != dao) revert NotDAO();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Private functions
+    // ─────────────────────────────────────────────────────────────────────────
 
     /// @dev Shared slicing helper.
     function _slice(address[] storage arr, uint256 offset, uint256 limit)

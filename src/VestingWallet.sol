@@ -19,7 +19,7 @@ pragma solidity 0.8.24;
 
 import {VestingWalletUpgradeable} from "@openzeppelin/contracts-upgradeable/finance/VestingWalletUpgradeable.sol";
 import {VestingWalletCliffUpgradeable} from "@openzeppelin/contracts-upgradeable/finance/VestingWalletCliffUpgradeable.sol";
-import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -56,7 +56,7 @@ interface IVestingWalletFactory {
 /// @custom:security-contact security@blokcapital.io
 contract VestingWalletBlokc is
     VestingWalletCliffUpgradeable,
-    ReentrancyGuardUpgradeable,
+    ReentrancyGuard,
     PausableUpgradeable
 {
     using SafeERC20 for IERC20;
@@ -75,11 +75,11 @@ contract VestingWalletBlokc is
 
     // keccak256(abi.encode(uint256(keccak256("blokcapital.storage.VestingWalletBlokc")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant BlokcStorageLocation =
-        0x8a0c7c9f76b3a49d58cc1b7fcf842a93e19e2a2d3f8f0d9f6b3ed4e4c0b4ea00;
+        0x7462af9568179619757c9bd0d7b3cfa71d161118442c47e67268dff80c5c1400;
 
-    function _blokcStorage() private pure returns (BlokcStorage storage $) {
+    function _blokcStorage() private pure returns (BlokcStorage storage bs) {
         assembly {
-            $.slot := BlokcStorageLocation
+            bs.slot := BlokcStorageLocation
         }
     }
 
@@ -103,7 +103,7 @@ contract VestingWalletBlokc is
     error ZeroAddress();
 
     /// @notice `renounceOwnership` is permanently disabled to prevent the vested
-    ///         funds from being orphaned with no reachable owner.
+    /// funds from being orphaned with no reachable owner.
     error RenounceDisabled();
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -168,12 +168,11 @@ contract VestingWalletBlokc is
 
         __VestingWallet_init(beneficiary_, startTimestamp, durationSeconds);
         __VestingWalletCliff_init(cliffDuration);
-        __ReentrancyGuard_init();
         __Pausable_init();
 
-        BlokcStorage storage $ = _blokcStorage();
-        $.factory = IVestingWalletFactory(factory_);
-        $.revokeAllowed = revokeAllowed_;
+        BlokcStorage storage bs = _blokcStorage();
+        bs.factory = IVestingWalletFactory(factory_);
+        bs.revokeAllowed = revokeAllowed_;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -257,17 +256,17 @@ contract VestingWalletBlokc is
 
     /// @notice Sweep the unvested portion of `token` back to the DAO.
     function revoke(address token, bytes32 proposalRef) external onlyDAO nonReentrant {
-        BlokcStorage storage $ = _blokcStorage();
-        if (!$.revokeAllowed) revert RevokeNotAllowed();
-        if ($.revoked[token]) revert AlreadyRevoked();
+        BlokcStorage storage bs = _blokcStorage();
+        if (!bs.revokeAllowed) revert RevokeNotAllowed();
+        if (bs.revoked[token]) revert AlreadyRevoked();
 
         uint256 bal = IERC20(token).balanceOf(address(this));
         uint256 claimable = releasable(token);
         uint256 unvestedAmount = bal - claimable;
 
-        $.revoked[token] = true;
+        bs.revoked[token] = true;
 
-        address daoAddr = $.factory.dao();
+        address daoAddr = bs.factory.dao();
         if (unvestedAmount > 0) {
             IERC20(token).safeTransfer(daoAddr, unvestedAmount);
         }
@@ -276,17 +275,17 @@ contract VestingWalletBlokc is
 
     /// @notice Sweep the unvested portion of the wallet's ETH balance to the DAO.
     function revokeEth(bytes32 proposalRef) external onlyDAO nonReentrant {
-        BlokcStorage storage $ = _blokcStorage();
-        if (!$.revokeAllowed) revert RevokeNotAllowed();
-        if ($.ethRevoked) revert AlreadyRevoked();
+        BlokcStorage storage bs = _blokcStorage();
+        if (!bs.revokeAllowed) revert RevokeNotAllowed();
+        if (bs.ethRevoked) revert AlreadyRevoked();
 
         uint256 bal = address(this).balance;
         uint256 claimable = releasable();
         uint256 unvestedAmount = bal - claimable;
 
-        $.ethRevoked = true;
+        bs.ethRevoked = true;
 
-        address daoAddr = $.factory.dao();
+        address daoAddr = bs.factory.dao();
         if (unvestedAmount > 0) {
             Address.sendValue(payable(daoAddr), unvestedAmount);
         }
@@ -320,7 +319,19 @@ contract VestingWalletBlokc is
     }
 
     /// @notice Disabled. Always reverts with {RenounceDisabled}.
-    function renounceOwnership() public override onlyDAO {
+    /// @dev Renouncing would set the owner to the zero address and make every
+    ///future {release} call transfer to the zero address — effectively
+    ///burning the vested funds. Disallowed by design.
+    function renounceOwnership() public view override onlyDAO {
         revert RenounceDisabled();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Internals
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function _checkDAO() internal view {
+        BlokcStorage storage bs = _blokcStorage();
+        if (msg.sender != bs.factory.dao()) revert NotDAO();
     }
 }
