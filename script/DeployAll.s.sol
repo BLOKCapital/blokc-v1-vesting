@@ -1,33 +1,30 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-/*###############################################################################
-
-    @title Vesting System Deployment Script
-    @author BLOK Capital DAO
-    @notice Deploys the shared {VestingWalletBlokc} implementation and the
-            {VestingWalletFactory} that clones it. DAO is read from DAO_ADDRESS.
-
-################################################################################*/
-
 import {Script, console} from "forge-std/Script.sol";
-import {VestingWalletBlokc} from "../src/VestingWallet.sol";
-import {VestingWalletFactory} from "../src/factory/VestingWalletFactory.sol";
+import {BLOKCVestingWallet} from "../src/BLOKCVestingWallet.sol";
+import {BLOKCVestingFactory} from "../src/BLOKCVestingFactory.sol";
 
 /// @title DeployAll
 /// @author BLOK Capital DAO
-/// @notice Forge deployment script for the clone-based vesting system.
+/// @notice Deploys the BLOKCVestingWallet implementation and the
+///         BLOKCVestingFactory pointing at it. Reads BLOKC_TOKEN,
+///         TREASURY_ADDRESS, and GOVERNANCE_ADDRESS from env.
 contract DeployAll is Script {
-    /// @notice Deploys the implementation and then the factory pointing at it.
-    /// @return implementation The shared {VestingWalletBlokc} logic contract.
-    /// @return factory The deployed {VestingWalletFactory} instance.
-    function run() external returns (VestingWalletBlokc implementation, VestingWalletFactory factory) {
-        address dao = vm.envAddress("DAO_ADDRESS");
+    function run() external returns (BLOKCVestingWallet implementation, BLOKCVestingFactory factory) {
+        address token = vm.envAddress("BLOKC_TOKEN");
+        address treasury = vm.envAddress("TREASURY_ADDRESS");
+        address governance = vm.envAddress("GOVERNANCE_ADDRESS");
+
         vm.startBroadcast();
-        implementation = new VestingWalletBlokc();
-        factory = new VestingWalletFactory(address(implementation), dao);
+        implementation = new BLOKCVestingWallet();
+        factory = new BLOKCVestingFactory(address(implementation), token, treasury, governance);
         vm.stopBroadcast();
+
+        console.log("Implementation deployed at:", address(implementation));
         console.log("Factory deployed at:", address(factory));
-        console.log("DAO set to:", dao);
+        console.log("Token:", token);
+        console.log("Treasury:", treasury);
+        console.log("Governance (factory owner):", governance);
     }
 }
