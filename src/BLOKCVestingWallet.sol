@@ -3,22 +3,33 @@ pragma solidity 0.8.24;
 
 import {VestingWalletUpgradeable} from "@openzeppelin/contracts-upgradeable/finance/VestingWalletUpgradeable.sol";
 import {VestingWalletCliffUpgradeable} from "@openzeppelin/contracts-upgradeable/finance/VestingWalletCliffUpgradeable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IVotes} from "@openzeppelin/contracts/governance/utils/IVotes.sol";
+
+/// @notice Minimal callback interface used by the wallet to notify the
+///         factory on forfeit so dashboards/indexers see a single feed.
+interface IBLOKCVestingFactory {
+    function notifyForfeit(uint256 unvestedAmount) external;
+}
 
 /**
  * @title BLOKCVestingWallet
  * @author BLOK Capital
  * @notice Per-vest contract holding $BLOKC for a single beneficiary. Implements
- *         BCIP-001: cliff-then-linear schedule, prePaid flag separating builder
- *         from investor vests, terminationDisclosed gate on DAO termination,
- *         voluntary forfeiture, and day-one voting power via IVotes delegation.
+ *         BCIP-001: cliff-then-linear schedule (OZ math — at cliff end the
+ *         linearly accrued portion through the cliff becomes claimable; e.g.
+ *         12mo cliff of a 48mo total schedule unlocks 25% at month 12, then
+ *         linearly to 100% at month 48), prePaid flag separating builder from
+ *         investor vests, terminationDisclosed gate on DAO termination,
+ *         voluntary forfeiture (builders only), and day-one voting power via
+ *         IVotes delegation.
  *
  *         Deployed as an EIP-1167 minimal proxy clone by BLOKCVestingFactory.
  *         The factory is the only authorized caller of {terminate}.
  */
-contract BLOKCVestingWallet is VestingWalletCliffUpgradeable {
+contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ---------------------------------------------------------------------
@@ -41,7 +52,12 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable {
     // Events
     // ---------------------------------------------------------------------
 
-    event Terminated(uint256 unvestedReturnedToTreasury, uint64 endedAt, bytes32 proposalRef);
+    event Terminated(
+        uint256 unvestedReturnedToTreasury,
+        uint64 endedAt,
+        bytes32 proposalRef,
+        bytes32 groundsHash
+    );
     event Forfeited(uint256 unvestedReturnedToTreasury, uint64 endedAt);
 
     // ---------------------------------------------------------------------
@@ -51,12 +67,14 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable {
     error NotBeneficiary();
     error NotFactory();
     error InvestorVestNonTerminable();
+    error InvestorVestNonForfeitable();
     error TerminationNotDisclosed();
     error AlreadyEnded();
     error ZeroAddress();
     error InvalidDuration();
     error RenounceDisabled();
     error OwnershipTransferDisabled();
+    error EthNotSupported();
 
     // ---------------------------------------------------------------------
     // Constructor — disables initializers on the implementation contract
@@ -70,6 +88,9 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable {
     // Initialization (called by the factory after cloning)
     // ---------------------------------------------------------------------
 
+    /// @notice Cliff and linear durations come from the factory's immutable
+    ///         schedule — every vest deployed by a given factory shares the
+    ///         same curve, regardless of prePaid / terminationDisclosed.
     function initialize(
         address factory_,
         address token_,
@@ -127,6 +148,11 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable {
     ///         returning unvested tokens to the treasury on termination does
     ///         not corrupt the curve. Caps the effective timestamp at
     ///         {endedAt} when the vest has been ended.
+    ///
+    ///         The underlying {_vestingSchedule} is OZ's cliff curve: 0 before
+    ///         cliff(), then `total * (t - start) / duration` from the cliff
+    ///         moment onward. For a 12/36/48 schedule that's 25% at month 12,
+    ///         50% at month 24, 100% at month 48.
     function vestedAmount(
         address tkn,
         uint64 timestamp
@@ -136,28 +162,8 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable {
         return _vestingSchedule(totalAtStart, effective);
     }
 
-    /// @notice BCIP-001 curve: 0 before cliff(); linear from 0 at the cliff
-    ///         end to {totalAllocation} at start() + duration().
-    ///         Diverges from OZ VestingWalletCliffUpgradeable, which jumps to
-    ///         `totalAllocation * cliff / duration` at the cliff moment.
-    function _vestingSchedule(
-        uint256 totalAllocation,
-        uint64 timestamp
-    ) internal view virtual override returns (uint256) {
-        uint64 cliffEnd = uint64(cliff());
-        uint64 vestEnd = uint64(start() + duration());
-
-        if (timestamp < cliffEnd) {
-            return 0;
-        } else if (timestamp >= vestEnd) {
-            return totalAllocation;
-        } else {
-            return (totalAllocation * (timestamp - cliffEnd)) / (vestEnd - cliffEnd);
-        }
-    }
-
     // ---------------------------------------------------------------------
-    // Termination
+    // Termination — DAO-initiated, factory-routed
     // ---------------------------------------------------------------------
 
     /// @notice End the vest by DAO action. Returns the unvested portion to
@@ -165,7 +171,10 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable {
     ///         beneficiary via {release}. Reverts unconditionally for
     ///         investor (prePaid) vests — the contract-level protection
     ///         promised in BCIP-001.
-    function terminate(bytes32 proposalRef) external onlyFactory {
+    /// @param proposalRef Aragon proposal hash that authorised this call.
+    /// @param groundsHash keccak of the published grounds text. Pinned on
+    ///        chain so a future audit can detect grounds-text tampering.
+    function terminate(bytes32 proposalRef, bytes32 groundsHash) external onlyFactory nonReentrant {
         if (prePaid) revert InvestorVestNonTerminable();
         if (!terminationDisclosed) revert TerminationNotDisclosed();
         if (ended) revert AlreadyEnded();
@@ -181,17 +190,26 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable {
             IERC20(token).safeTransfer(treasury, unvested);
         }
 
-        emit Terminated(unvested, endTime, proposalRef);
+        emit Terminated(unvested, endTime, proposalRef, groundsHash);
     }
 
     // ---------------------------------------------------------------------
-    // Voluntary forfeit — beneficiary initiated
+    // Voluntary forfeit — beneficiary initiated, builders only
     // ---------------------------------------------------------------------
 
     /// @notice Beneficiary-initiated end of the vest. Pre-cliff: full
     ///         allocation returns to treasury. Post-cliff: vested portion
     ///         remains claimable, unvested returns to treasury.
-    function forfeit() external onlyBeneficiary {
+    ///
+    ///         Reverts for investor (prePaid) vests — investors paid for
+    ///         their allocation; voluntarily forfeiting it is not a defined
+    ///         action under BCIP-001 and would only ever be a misclick. The
+    ///         tokens vest normally and are claimable on schedule.
+    ///
+    ///         On success, calls {IBLOKCVestingFactory.notifyForfeit} so the
+    ///         factory emits a single-source-of-truth event for indexers.
+    function forfeit() external onlyBeneficiary nonReentrant {
+        if (prePaid) revert InvestorVestNonForfeitable();
         if (ended) revert AlreadyEnded();
 
         uint64 endTime = uint64(block.timestamp);
@@ -205,23 +223,54 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable {
             IERC20(token).safeTransfer(treasury, unvested);
         }
 
+        IBLOKCVestingFactory(factory).notifyForfeit(unvested);
+
         emit Forfeited(unvested, endTime);
     }
 
     // ---------------------------------------------------------------------
-    // Ownership controls
+    // Claim — pause-free, reentrancy-guarded
+    // ---------------------------------------------------------------------
+
+    /// @notice Release the vested $BLOKC to the beneficiary. Anyone can call
+    ///         this; funds always go to {owner}. Reentrancy-guarded as
+    ///         defence-in-depth around the underlying ERC20 transfer.
+    function release(address tkn) public virtual override nonReentrant {
+        super.release(tkn);
+    }
+
+    // ---------------------------------------------------------------------
+    // ETH path permanently disabled
+    // ---------------------------------------------------------------------
+
+    /// @notice ETH is not part of BCIP-001 scope. Reject incoming ETH so it
+    ///         cannot accidentally vest to the beneficiary.
+    receive() external payable override {
+        revert EthNotSupported();
+    }
+
+    function release() public pure override {
+        revert EthNotSupported();
+    }
+
+    function vestedAmount(uint64) public pure override returns (uint256) {
+        return 0;
+    }
+
+    // ---------------------------------------------------------------------
+    // Ownership controls — both paths permanently disabled
     // ---------------------------------------------------------------------
 
     /// @notice Renouncing would orphan vested-but-unclaimed tokens and kill
     ///         the IVotes delegation. Permanently disabled.
-    function renounceOwnership() public view override onlyBeneficiary {
+    function renounceOwnership() public view override {
         revert RenounceDisabled();
     }
 
     /// @notice A vest is bound to its original beneficiary; rotating
     ///         addresses is not supported. Keeps the factory's
     ///         `_vestsByBeneficiary` registry authoritative.
-    function transferOwnership(address) public view override onlyBeneficiary {
+    function transferOwnership(address) public view override {
         revert OwnershipTransferDisabled();
     }
 
@@ -237,6 +286,12 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable {
     /// @notice Amount of $BLOKC currently claimable via {release}.
     function claimable() external view returns (uint256) {
         return releasable(token);
+    }
+
+    /// @notice Whether this vest's agreement disclosed the DAO's termination
+    ///         right. Builder vests with `false` cannot be terminated.
+    function isTerminationDisclosed() external view returns (bool) {
+        return terminationDisclosed;
     }
 
     /// @notice Total promised allocation that has not yet been released.
