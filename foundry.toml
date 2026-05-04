@@ -6,8 +6,11 @@ remappings = [
     "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
 ]
-solc_version = "0.8.24"
+solc_version = "0.8.31"
 via_ir = true
 optimizer = true
 optimizer_runs = 200
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+[profile.ci]
+
