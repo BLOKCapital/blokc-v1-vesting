@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.31;
 
 import {VestingWalletUpgradeable} from "@openzeppelin/contracts-upgradeable/finance/VestingWalletUpgradeable.sol";
-import {VestingWalletCliffUpgradeable} from "@openzeppelin/contracts-upgradeable/finance/VestingWalletCliffUpgradeable.sol";
+import {
+    VestingWalletCliffUpgradeable
+} from "@openzeppelin/contracts-upgradeable/finance/VestingWalletCliffUpgradeable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -52,12 +54,7 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     // Events
     // ---------------------------------------------------------------------
 
-    event Terminated(
-        uint256 unvestedReturnedToTreasury,
-        uint64 endedAt,
-        bytes32 proposalRef,
-        bytes32 groundsHash
-    );
+    event Terminated(uint256 unvestedReturnedToTreasury, uint64 endedAt, bytes32 proposalRef, bytes32 groundsHash);
     event Forfeited(uint256 unvestedReturnedToTreasury, uint64 endedAt);
 
     // ---------------------------------------------------------------------
@@ -153,10 +150,7 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     ///         cliff(), then `total * (t - start) / duration` from the cliff
     ///         moment onward. For a 12/36/48 schedule that's 25% at month 12,
     ///         50% at month 24, 100% at month 48.
-    function vestedAmount(
-        address tkn,
-        uint64 timestamp
-    ) public view virtual override returns (uint256) {
+    function vestedAmount(address tkn, uint64 timestamp) public view virtual override returns (uint256) {
         if (tkn != token) return 0;
         uint64 effective = ended && timestamp > endedAt ? endedAt : timestamp;
         return _vestingSchedule(totalAtStart, effective);

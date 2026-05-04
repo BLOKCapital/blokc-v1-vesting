@@ -22,12 +22,7 @@ contract DeployAll is Script {
         vm.startBroadcast();
         implementation = new BLOKCVestingWallet();
         factory = new BLOKCVestingFactory(
-            address(implementation),
-            token,
-            treasury,
-            governance,
-            cliffDuration,
-            linearVestDuration
+            address(implementation), token, treasury, governance, cliffDuration, linearVestDuration
         );
         vm.stopBroadcast();
 

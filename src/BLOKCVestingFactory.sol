@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.31;
 
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
@@ -143,18 +143,19 @@ contract BLOKCVestingFactory is Ownable2Step {
         // as voting power for the beneficiary at the next checkpoint.
         IERC20(token).safeTransferFrom(treasury, vest, totalAmount);
 
-        BLOKCVestingWallet(payable(vest)).initialize(
-            address(this),
-            token,
-            treasury,
-            beneficiary,
-            startTimestamp,
-            cliffDuration,
-            linearVestDuration,
-            prePaid,
-            terminationDisclosed,
-            totalAmount
-        );
+        BLOKCVestingWallet(payable(vest))
+            .initialize(
+                address(this),
+                token,
+                treasury,
+                beneficiary,
+                startTimestamp,
+                cliffDuration,
+                linearVestDuration,
+                prePaid,
+                terminationDisclosed,
+                totalAmount
+            );
 
         allVests.push(vest);
         _vestsByBeneficiary[beneficiary].push(vest);
@@ -175,11 +176,7 @@ contract BLOKCVestingFactory is Ownable2Step {
     /// @param vest         Address of the BLOKCVestingWallet clone.
     /// @param proposalRef  Aragon proposal hash that authorised this call.
     /// @param groundsHash  keccak of the published grounds text.
-    function terminateVest(
-        address vest,
-        bytes32 proposalRef,
-        bytes32 groundsHash
-    ) external onlyOwner {
+    function terminateVest(address vest, bytes32 proposalRef, bytes32 groundsHash) external onlyOwner {
         BLOKCVestingWallet(payable(vest)).terminate(proposalRef, groundsHash);
         emit VestTerminated(vest, proposalRef, groundsHash);
     }
@@ -214,9 +211,7 @@ contract BLOKCVestingFactory is Ownable2Step {
         return allVests.length;
     }
 
-    function getVestsByBeneficiary(
-        address beneficiary
-    ) external view returns (address[] memory) {
+    function getVestsByBeneficiary(address beneficiary) external view returns (address[] memory) {
         return _vestsByBeneficiary[beneficiary];
     }
 
