@@ -12,12 +12,9 @@ contract BLOKCVestingFactoryFuzz is BaseTest {
     /// @notice Every successful createVest grows allVests by exactly one,
     ///         records the new clone in isVest, and appends it to the
     ///         beneficiary's per-user list.
-    function testFuzz_createVest_registryGrows(
-        address beneficiary_,
-        uint96 amount,
-        uint32 startOffset,
-        uint8 flagBits
-    ) public {
+    function testFuzz_createVest_registryGrows(address beneficiary_, uint96 amount, uint32 startOffset, uint8 flagBits)
+        public
+    {
         vm.assume(beneficiary_ != address(0));
         vm.assume(beneficiary_.code.length == 0); // avoid OZ Ownable rejecting if we land on a contract that reverts on receive
         amount = uint96(bound(amount, 1, 100_000 ether));
@@ -83,11 +80,9 @@ contract BLOKCVestingFactoryFuzz is BaseTest {
 
     /// @notice Aggregate unclaimedAllocation = sum of per-vest unclaimedAllocation
     ///         for any user, at any time, regardless of releases / terminations.
-    function testFuzz_unclaimedAllocation_aggregateMatchesSum(
-        uint8 vestCount,
-        uint256 elapsed,
-        uint8 actionMask
-    ) public {
+    function testFuzz_unclaimedAllocation_aggregateMatchesSum(uint8 vestCount, uint256 elapsed, uint8 actionMask)
+        public
+    {
         vestCount = uint8(bound(vestCount, 1, 6));
         elapsed = bound(elapsed, 0, 2 * (uint256(CLIFF) + LINEAR));
 

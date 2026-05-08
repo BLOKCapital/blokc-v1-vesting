@@ -29,9 +29,7 @@ contract BLOKCVestingInvariants is StdInvariant, Test {
         vm.warp(1_700_000_000);
         token = new MockBLOKC();
         implementation = new BLOKCVestingWallet();
-        factory = new BLOKCVestingFactory(
-            address(implementation), address(token), treasury, governance, CLIFF, LINEAR
-        );
+        factory = new BLOKCVestingFactory(address(implementation), address(token), treasury, governance, CLIFF, LINEAR);
 
         // Pre-approve max so the handler doesn't need to manage it.
         vm.prank(treasury);

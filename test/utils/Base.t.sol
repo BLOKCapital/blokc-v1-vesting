@@ -31,9 +31,7 @@ abstract contract BaseTest is Test {
 
         token = new MockBLOKC();
         implementation = new BLOKCVestingWallet();
-        factory = new BLOKCVestingFactory(
-            address(implementation), address(token), treasury, governance, CLIFF, LINEAR
-        );
+        factory = new BLOKCVestingFactory(address(implementation), address(token), treasury, governance, CLIFF, LINEAR);
 
         token.mint(treasury, TREASURY_FUND);
         vm.prank(treasury);

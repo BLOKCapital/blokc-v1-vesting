@@ -46,9 +46,8 @@ contract BLOKCVestingFactory_Constructor is BaseTest {
     }
 
     function test_constructor_zeroCliffAllowed() public {
-        BLOKCVestingFactory f = new BLOKCVestingFactory(
-            address(implementation), address(token), treasury, governance, 0, LINEAR
-        );
+        BLOKCVestingFactory f =
+            new BLOKCVestingFactory(address(implementation), address(token), treasury, governance, 0, LINEAR);
         assertEq(f.cliffDuration(), 0);
     }
 }
@@ -117,7 +116,9 @@ contract BLOKCVestingFactory_CreateVest is BaseTest {
 
         vm.prank(governance);
         vm.expectRevert(
-            abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, address(factory), 0, DEFAULT_AMOUNT)
+            abi.encodeWithSelector(
+                IERC20Errors.ERC20InsufficientAllowance.selector, address(factory), 0, DEFAULT_AMOUNT
+            )
         );
         factory.createVest(beneficiary, DEFAULT_AMOUNT, uint64(block.timestamp), false, true);
     }

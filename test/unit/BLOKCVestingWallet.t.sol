@@ -5,8 +5,9 @@ import {BaseTest} from "../utils/Base.t.sol";
 import {BLOKCVestingWallet} from "../../src/BLOKCVestingWallet.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
-import {VestingWalletCliffUpgradeable} from
-    "@openzeppelin/contracts-upgradeable/finance/VestingWalletCliffUpgradeable.sol";
+import {
+    VestingWalletCliffUpgradeable
+} from "@openzeppelin/contracts-upgradeable/finance/VestingWalletCliffUpgradeable.sol";
 
 contract BLOKCVestingWallet_Constructor is BaseTest {
     function test_implementation_initializerDisabled() public {

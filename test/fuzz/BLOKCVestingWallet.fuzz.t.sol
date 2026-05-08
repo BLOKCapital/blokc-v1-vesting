@@ -25,9 +25,8 @@ contract BLOKCVestingWalletFuzz is BaseTest {
         vm.stopPrank();
 
         // Reuse BaseTest's factory by deploying a fresh one with the fuzzed schedule.
-        BLOKCVestingFactoryFresh f = new BLOKCVestingFactoryFresh(
-            address(impl), address(token), treasury, governance, cliff, linear
-        );
+        BLOKCVestingFactoryFresh f =
+            new BLOKCVestingFactoryFresh(address(impl), address(token), treasury, governance, cliff, linear);
         vm.prank(treasury);
         token.approve(address(f), type(uint256).max);
         vm.prank(governance);
@@ -91,12 +90,7 @@ contract BLOKCVestingWalletFuzz is BaseTest {
     }
 
     /// @notice At/after end the vested amount equals totalAmount.
-    function testFuzz_vestedAmount_fullAtOrAfterEnd(
-        uint256 amount,
-        uint64 cliff,
-        uint64 linear,
-        uint64 extra
-    ) public {
+    function testFuzz_vestedAmount_fullAtOrAfterEnd(uint256 amount, uint64 cliff, uint64 linear, uint64 extra) public {
         amount = bound(amount, 1, MAX_AMOUNT);
         cliff = uint64(bound(cliff, 0, MAX_CLIFF));
         linear = uint64(bound(linear, 1, MAX_LINEAR));
@@ -111,12 +105,7 @@ contract BLOKCVestingWalletFuzz is BaseTest {
 
     /// @notice Termination conservation: at the moment of terminate(),
     ///         treasuryReturn + vestedFrozen == totalAtStart.
-    function testFuzz_terminate_conservesTotal(
-        uint256 amount,
-        uint64 cliff,
-        uint64 linear,
-        uint256 elapsed
-    ) public {
+    function testFuzz_terminate_conservesTotal(uint256 amount, uint64 cliff, uint64 linear, uint256 elapsed) public {
         amount = bound(amount, 1, MAX_AMOUNT);
         cliff = uint64(bound(cliff, 0, MAX_CLIFF));
         linear = uint64(bound(linear, 1, MAX_LINEAR));
@@ -142,12 +131,7 @@ contract BLOKCVestingWalletFuzz is BaseTest {
     }
 
     /// @notice Forfeit conservation mirrors terminate.
-    function testFuzz_forfeit_conservesTotal(
-        uint256 amount,
-        uint64 cliff,
-        uint64 linear,
-        uint256 elapsed
-    ) public {
+    function testFuzz_forfeit_conservesTotal(uint256 amount, uint64 cliff, uint64 linear, uint256 elapsed) public {
         amount = bound(amount, 1, MAX_AMOUNT);
         cliff = uint64(bound(cliff, 0, MAX_CLIFF));
         linear = uint64(bound(linear, 1, MAX_LINEAR));
@@ -170,12 +154,7 @@ contract BLOKCVestingWalletFuzz is BaseTest {
 
     /// @notice Releasing in chunks at increasing timestamps never overpays
     ///         the beneficiary.
-    function testFuzz_release_chunked_neverOverpays(
-        uint256 amount,
-        uint64 cliff,
-        uint64 linear,
-        uint64 step
-    ) public {
+    function testFuzz_release_chunked_neverOverpays(uint256 amount, uint64 cliff, uint64 linear, uint64 step) public {
         amount = bound(amount, 1, MAX_AMOUNT);
         cliff = uint64(bound(cliff, 0, MAX_CLIFF));
         linear = uint64(bound(linear, 1, MAX_LINEAR));
@@ -210,12 +189,7 @@ contract BLOKCVestingWalletFuzz is BaseTest {
 import {BLOKCVestingFactory} from "../../src/BLOKCVestingFactory.sol";
 
 contract BLOKCVestingFactoryFresh is BLOKCVestingFactory {
-    constructor(
-        address impl,
-        address token_,
-        address treasury_,
-        address governance_,
-        uint64 cliff,
-        uint64 linear
-    ) BLOKCVestingFactory(impl, token_, treasury_, governance_, cliff, linear) {}
+    constructor(address impl, address token_, address treasury_, address governance_, uint64 cliff, uint64 linear)
+        BLOKCVestingFactory(impl, token_, treasury_, governance_, cliff, linear)
+    {}
 }
