@@ -56,6 +56,7 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
 
     event Terminated(uint256 unvestedReturnedToTreasury, uint64 endedAt, bytes32 proposalRef, bytes32 groundsHash);
     event Forfeited(uint256 unvestedReturnedToTreasury, uint64 endedAt);
+    event DelegateUpdated(address indexed previousDelegate, address indexed newDelegate);
 
     // ---------------------------------------------------------------------
     // Errors
@@ -67,6 +68,7 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     error InvestorVestNonForfeitable();
     error TerminationNotDisclosed();
     error AlreadyEnded();
+    error AlreadyMatured();
     error ZeroAddress();
     error InvalidDuration();
     error RenounceDisabled();
@@ -117,6 +119,12 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         terminationDisclosed = terminationDisclosed_;
         totalAtStart = totalAmount_;
 
+        // Sweep any pre-existing surplus so delegated votes equal exactly totalAmount_.
+        uint256 bal = IERC20(token_).balanceOf(address(this));
+        if (bal > totalAmount_) {
+            IERC20(token_).safeTransfer(treasury_, bal - totalAmount_);
+        }
+
         // Day-one voting power: the wallet's $BLOKC balance accrues votes to
         // the beneficiary on Aragon TokenVoting from this block forward.
         IVotes(token_).delegate(beneficiary_);
@@ -164,7 +172,8 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     ///         the treasury; already-vested tokens remain claimable by the
     ///         beneficiary via {release}. Reverts unconditionally for
     ///         investor (prePaid) vests — the contract-level protection
-    ///         promised in BCIP-001.
+    ///         promised in BCIP-001. Reverts post-maturity to prevent
+    ///         misleading termination events on naturally-completed vests.
     /// @param proposalRef Aragon proposal hash that authorised this call.
     /// @param groundsHash keccak of the published grounds text. Pinned on
     ///        chain so a future audit can detect grounds-text tampering.
@@ -172,13 +181,14 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         if (prePaid) revert InvestorVestNonTerminable();
         if (!terminationDisclosed) revert TerminationNotDisclosed();
         if (ended) revert AlreadyEnded();
+        if (totalAtStart - _vestingSchedule(totalAtStart, uint64(block.timestamp)) == 0) revert AlreadyMatured();
 
         uint64 endTime = uint64(block.timestamp);
         ended = true;
         endedAt = endTime;
 
-        uint256 vested = _vestingSchedule(totalAtStart, endTime);
-        uint256 unvested = totalAtStart - vested;
+        uint256 vestedAmt = _vestingSchedule(totalAtStart, endTime);
+        uint256 unvested = totalAtStart - vestedAmt;
 
         if (unvested > 0) {
             IERC20(token).safeTransfer(treasury, unvested);
@@ -200,18 +210,22 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     ///         action under BCIP-001 and would only ever be a misclick. The
     ///         tokens vest normally and are claimable on schedule.
     ///
+    ///         Reverts post-maturity (all tokens already vested) to prevent
+    ///         misleading forfeit events with unvested == 0.
+    ///
     ///         On success, calls {IBLOKCVestingFactory.notifyForfeit} so the
     ///         factory emits a single-source-of-truth event for indexers.
     function forfeit() external onlyBeneficiary nonReentrant {
         if (prePaid) revert InvestorVestNonForfeitable();
         if (ended) revert AlreadyEnded();
+        if (totalAtStart - _vestingSchedule(totalAtStart, uint64(block.timestamp)) == 0) revert AlreadyMatured();
 
         uint64 endTime = uint64(block.timestamp);
         ended = true;
         endedAt = endTime;
 
-        uint256 vested = _vestingSchedule(totalAtStart, endTime);
-        uint256 unvested = totalAtStart - vested;
+        uint256 vestedAmt = _vestingSchedule(totalAtStart, endTime);
+        uint256 unvested = totalAtStart - vestedAmt;
 
         if (unvested > 0) {
             IERC20(token).safeTransfer(treasury, unvested);
@@ -234,7 +248,7 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     }
 
     // ---------------------------------------------------------------------
-    // ETH path permanently disabled
+    // ETH rejected; standard no-arg interface re-routed to ERC20
     // ---------------------------------------------------------------------
 
     /// @notice ETH is not part of BCIP-001 scope. Reject incoming ETH so it
@@ -243,12 +257,25 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         revert EthNotSupported();
     }
 
-    function release() public pure override {
-        revert EthNotSupported();
+    /// @notice No-arg release routes to the ERC20 path so generic OZ
+    ///         integrations work correctly without knowing the token address.
+    function release() public virtual override nonReentrant {
+        super.release(token);
     }
 
     function vestedAmount(uint64) public pure override returns (uint256) {
         return 0;
+    }
+
+    /// @notice Returns the ERC20 $BLOKC amount currently claimable, so no-arg
+    ///         OZ integrations read the correct value instead of 0.
+    function releasable() public view virtual override returns (uint256) {
+        return super.releasable(token);
+    }
+
+    /// @notice Returns the ERC20 $BLOKC amount released to date.
+    function released() public view virtual override returns (uint256) {
+        return super.released(token);
     }
 
     // ---------------------------------------------------------------------
@@ -266,6 +293,19 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     ///         `_vestsByBeneficiary` registry authoritative.
     function transferOwnership(address) public view override {
         revert OwnershipTransferDisabled();
+    }
+
+    // ---------------------------------------------------------------------
+    // Governance delegation rotation
+    // ---------------------------------------------------------------------
+
+    /// @notice Re-delegates the vest's voting power to a new address.
+    ///         Only the beneficiary can call this. Emits {DelegateUpdated}.
+    function updateDelegate(address newDelegate) external onlyBeneficiary {
+        if (newDelegate == address(0)) revert ZeroAddress();
+        address previous = IVotes(token).delegates(address(this));
+        IVotes(token).delegate(newDelegate);
+        emit DelegateUpdated(previous, newDelegate);
     }
 
     // ---------------------------------------------------------------------

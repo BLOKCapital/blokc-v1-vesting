@@ -110,10 +110,10 @@ contract BLOKCVestingFactoryFuzz is BaseTest {
                 v.release(address(token));
             }
         }
-        // Try to terminate a builder+disclosed vest; ignore reverts (investor / not disclosed).
+        // Try to terminate a builder+disclosed, non-matured vest.
         for (uint256 i; i < list.length; ++i) {
             BLOKCVestingWallet v = BLOKCVestingWallet(payable(list[i]));
-            if (!v.prePaid() && v.isTerminationDisclosed() && !v.ended()) {
+            if (!v.prePaid() && v.isTerminationDisclosed() && !v.ended() && v.vested() < v.totalAtStart()) {
                 vm.prank(governance);
                 factory.terminateVest(address(v), bytes32("p"), bytes32("g"));
                 break; // single termination is enough to exercise the ended branch

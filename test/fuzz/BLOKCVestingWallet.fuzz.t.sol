@@ -110,7 +110,9 @@ contract BLOKCVestingWalletFuzz is BaseTest {
         cliff = uint64(bound(cliff, 0, MAX_CLIFF));
         linear = uint64(bound(linear, 1, MAX_LINEAR));
         uint64 total = cliff + linear;
-        elapsed = bound(elapsed, 0, 2 * uint256(total));
+        // Cap elapsed to total - 1 so the vest is never fully matured when we
+        // call terminate (AlreadyMatured reverts on fully-vested vests).
+        elapsed = bound(elapsed, 0, uint256(total) - 1);
 
         uint64 startTs = uint64(block.timestamp);
         BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs);
@@ -136,7 +138,9 @@ contract BLOKCVestingWalletFuzz is BaseTest {
         cliff = uint64(bound(cliff, 0, MAX_CLIFF));
         linear = uint64(bound(linear, 1, MAX_LINEAR));
         uint64 total = cliff + linear;
-        elapsed = bound(elapsed, 0, 2 * uint256(total));
+        // Cap elapsed to total - 1 so the vest is never fully matured when we
+        // call forfeit (AlreadyMatured reverts on fully-vested vests).
+        elapsed = bound(elapsed, 0, uint256(total) - 1);
 
         uint64 startTs = uint64(block.timestamp);
         BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs);

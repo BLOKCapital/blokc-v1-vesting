@@ -197,6 +197,13 @@ contract BLOKCVestingWallet_Terminate is BaseTest {
         factory.terminateVest(address(vest), bytes32("p2"), bytes32("g2"));
     }
 
+    function test_terminate_revertsAlreadyMatured() public {
+        vm.warp(startTs + CLIFF + LINEAR);
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingWallet.AlreadyMatured.selector);
+        factory.terminateVest(address(vest), bytes32("p"), bytes32("g"));
+    }
+
     function test_terminate_preCliff_returnsAllToTreasury() public {
         // Terminate before cliff; treasury gets the full balance back.
         uint256 treasuryBefore = token.balanceOf(treasury);
@@ -228,17 +235,6 @@ contract BLOKCVestingWallet_Terminate is BaseTest {
         // Wallet retains the still-claimable vested portion.
         assertEq(token.balanceOf(address(vest)), vestedNow);
         assertEq(vest.claimable(), vestedNow);
-    }
-
-    function test_terminate_atEnd_nothingReturned() public {
-        vm.warp(startTs + CLIFF + LINEAR);
-        uint256 treasuryBefore = token.balanceOf(treasury);
-
-        vm.prank(governance);
-        factory.terminateVest(address(vest), bytes32("p"), bytes32("g"));
-
-        assertEq(token.balanceOf(treasury), treasuryBefore, "no unvested left");
-        assertEq(vest.claimable(), DEFAULT_AMOUNT);
     }
 
     function test_terminate_thenReleaseStillWorks() public {
@@ -280,6 +276,13 @@ contract BLOKCVestingWallet_Forfeit is BaseTest {
         inv.forfeit();
     }
 
+    function test_forfeit_revertsAlreadyMatured() public {
+        vm.warp(startTs + CLIFF + LINEAR);
+        vm.expectRevert(BLOKCVestingWallet.AlreadyMatured.selector);
+        vm.prank(beneficiary);
+        vest.forfeit();
+    }
+
     function test_forfeit_preCliff_returnsAllToTreasury() public {
         uint256 treasuryBefore = token.balanceOf(treasury);
 
@@ -319,11 +322,12 @@ contract BLOKCVestingWallet_Forfeit is BaseTest {
     }
 
     function test_forfeit_emitsFactoryNotification() public {
-        vm.warp(startTs + CLIFF + LINEAR / 2);
+        uint64 warpTo = startTs + CLIFF + LINEAR / 2;
+        vm.warp(warpTo);
         uint256 unvested = DEFAULT_AMOUNT - vest.vested();
 
         vm.expectEmit(true, false, false, true, address(factory));
-        emit BLOKCVestingWalletFactoryEvent.VestForfeited(address(vest), unvested);
+        emit BLOKCVestingWalletFactoryEvent.VestForfeited(address(vest), unvested, warpTo);
         vm.prank(beneficiary);
         vest.forfeit();
     }
@@ -331,7 +335,7 @@ contract BLOKCVestingWallet_Forfeit is BaseTest {
 
 /// @dev Trampoline for cross-contract event signature lookup.
 interface BLOKCVestingWalletFactoryEvent {
-    event VestForfeited(address indexed vest, uint256 unvestedAmount);
+    event VestForfeited(address indexed vest, uint256 unvestedAmount, uint64 endedAt);
 }
 
 contract BLOKCVestingWallet_Release is BaseTest {
@@ -376,9 +380,29 @@ contract BLOKCVestingWallet_Release is BaseTest {
         assertEq(token.balanceOf(alice), 0);
     }
 
-    function test_release_eth_reverts() public {
-        vm.expectRevert(BLOKCVestingWallet.EthNotSupported.selector);
+    function test_release_noArg_routesToERC20() public {
+        // Before cliff: no-arg release should not revert and releases 0.
+        uint256 benBefore = token.balanceOf(beneficiary);
         vest.release();
+        assertEq(token.balanceOf(beneficiary), benBefore);
+
+        // After full vesting: releases all.
+        vm.warp(startTs + CLIFF + LINEAR);
+        vest.release();
+        assertEq(token.balanceOf(beneficiary), DEFAULT_AMOUNT);
+    }
+
+    function test_releasable_noArg_returnsERC20Amount() public {
+        assertEq(vest.releasable(), 0);
+        vm.warp(startTs + CLIFF + LINEAR);
+        assertEq(vest.releasable(), DEFAULT_AMOUNT);
+    }
+
+    function test_released_noArg_returnsERC20Amount() public {
+        vm.warp(startTs + CLIFF + LINEAR / 2);
+        uint256 amount = vest.claimable();
+        vest.release(address(token));
+        assertEq(vest.released(), amount);
     }
 
     function test_receive_revertsOnEth() public {
@@ -387,6 +411,41 @@ contract BLOKCVestingWallet_Release is BaseTest {
         (bool ok,) = address(vest).call{value: 1 ether}("");
         assertFalse(ok);
         assertEq(address(vest).balance, 0);
+    }
+}
+
+contract BLOKCVestingWallet_UpdateDelegate is BaseTest {
+    BLOKCVestingWallet internal vest;
+
+    function setUp() public override {
+        super.setUp();
+        vest = _defaultVest();
+    }
+
+    function test_updateDelegate_onlyBeneficiary() public {
+        vm.expectRevert(BLOKCVestingWallet.NotBeneficiary.selector);
+        vm.prank(alice);
+        vest.updateDelegate(alice);
+    }
+
+    function test_updateDelegate_revertsOnZeroAddress() public {
+        vm.prank(beneficiary);
+        vm.expectRevert(BLOKCVestingWallet.ZeroAddress.selector);
+        vest.updateDelegate(address(0));
+    }
+
+    function test_updateDelegate_changesDelegate() public {
+        assertEq(token.delegates(address(vest)), beneficiary);
+
+        vm.expectEmit(true, true, false, false, address(vest));
+        emit BLOKCVestingWallet.DelegateUpdated(beneficiary, alice);
+
+        vm.prank(beneficiary);
+        vest.updateDelegate(alice);
+
+        assertEq(token.delegates(address(vest)), alice);
+        assertEq(token.getVotes(alice), DEFAULT_AMOUNT);
+        assertEq(token.getVotes(beneficiary), 0);
     }
 }
 

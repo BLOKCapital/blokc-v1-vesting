@@ -50,6 +50,12 @@ contract BLOKCVestingFactory_Constructor is BaseTest {
             new BLOKCVestingFactory(address(implementation), address(token), treasury, governance, 0, LINEAR);
         assertEq(f.cliffDuration(), 0);
     }
+
+    function test_constructor_revertsOnEOAImplementation() public {
+        address eoa = makeAddr("eoa");
+        vm.expectRevert(BLOKCVestingFactory.InvalidImplementation.selector);
+        new BLOKCVestingFactory(eoa, address(token), treasury, governance, CLIFF, LINEAR);
+    }
 }
 
 contract BLOKCVestingFactory_CreateVest is BaseTest {
@@ -57,7 +63,7 @@ contract BLOKCVestingFactory_CreateVest is BaseTest {
         uint64 startTs = uint64(block.timestamp);
 
         vm.expectEmit(false, true, false, true);
-        emit BLOKCVestingFactory.VestCreated(address(0), beneficiary, DEFAULT_AMOUNT, startTs, false, true);
+        emit BLOKCVestingFactory.VestCreated(address(0), beneficiary, DEFAULT_AMOUNT, startTs, CLIFF, LINEAR, false, true);
 
         vm.prank(governance);
         address vest = factory.createVest(beneficiary, DEFAULT_AMOUNT, startTs, false, true);
@@ -166,19 +172,52 @@ contract BLOKCVestingFactory_TerminateVest is BaseTest {
     }
 
     function test_terminateVest_emitsAndForwards() public {
-        vm.warp(block.timestamp + CLIFF + LINEAR / 2);
+        uint64 warpTo = uint64(block.timestamp) + CLIFF + LINEAR / 2;
+        vm.warp(warpTo);
 
         bytes32 proposalRef = keccak256("proposal");
         bytes32 groundsHash = keccak256("grounds");
 
+        uint256 unvestedAmount = vest.totalAtStart() - vest.vested();
+
         vm.expectEmit(true, false, false, true);
-        emit BLOKCVestingFactory.VestTerminated(address(vest), proposalRef, groundsHash);
+        emit BLOKCVestingFactory.VestTerminated(address(vest), proposalRef, groundsHash, unvestedAmount, warpTo);
 
         vm.prank(governance);
         factory.terminateVest(address(vest), proposalRef, groundsHash);
 
         assertTrue(vest.ended());
-        assertEq(vest.endedAt(), uint64(block.timestamp));
+        assertEq(vest.endedAt(), warpTo);
+    }
+
+    function test_terminateVestGuarded_revertsWhenPastCliff() public {
+        vm.warp(block.timestamp + CLIFF + 1);
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingFactory.PastCliff.selector);
+        factory.terminateVestGuarded(address(vest), bytes32("p"), bytes32("g"), 0, true, 0);
+    }
+
+    function test_terminateVestGuarded_revertsWhenPastDeadline() public {
+        uint64 deadline = uint64(block.timestamp) - 1;
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingFactory.DeadlineExceeded.selector);
+        factory.terminateVestGuarded(address(vest), bytes32("p"), bytes32("g"), 0, false, deadline);
+    }
+
+    function test_terminateVestGuarded_revertsWhenInsufficientUnvested() public {
+        vm.warp(block.timestamp + CLIFF + LINEAR / 2);
+        uint256 unvested = vest.totalAtStart() - vest.vested();
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingFactory.InsufficientUnvested.selector);
+        factory.terminateVestGuarded(address(vest), bytes32("p"), bytes32("g"), unvested + 1, false, 0);
+    }
+
+    function test_terminateVestGuarded_happyPath_preCliff() public {
+        // Terminates pre-cliff with full unvested balance.
+        uint256 unvested = vest.totalAtStart(); // pre-cliff: all unvested
+        vm.prank(governance);
+        factory.terminateVestGuarded(address(vest), bytes32("p"), bytes32("g"), unvested, true, 0);
+        assertTrue(vest.ended());
     }
 }
 
@@ -190,10 +229,13 @@ contract BLOKCVestingFactory_NotifyForfeit is BaseTest {
 
     function test_notifyForfeit_emittedFromForfeit() public {
         BLOKCVestingWallet vest = _defaultVest();
-        vm.warp(block.timestamp + CLIFF + LINEAR / 4);
+        uint64 warpTo = uint64(block.timestamp) + CLIFF + LINEAR / 4;
+        vm.warp(warpTo);
 
-        vm.expectEmit(true, false, false, false);
-        emit BLOKCVestingFactory.VestForfeited(address(vest), 0); // amount checked in wallet tests
+        uint256 unvestedAmount = vest.totalAtStart() - vest.vested();
+
+        vm.expectEmit(true, false, false, true, address(factory));
+        emit BLOKCVestingFactory.VestForfeited(address(vest), unvestedAmount, warpTo);
         vm.prank(beneficiary);
         vest.forfeit();
     }
