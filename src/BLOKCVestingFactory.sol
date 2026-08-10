@@ -72,11 +72,7 @@ contract BLOKCVestingFactory is Ownable2Step {
     );
 
     event VestTerminated(
-        address indexed vest,
-        bytes32 proposalRef,
-        bytes32 groundsHash,
-        uint256 unvestedAmount,
-        uint64 endedAt
+        address indexed vest, bytes32 proposalRef, bytes32 groundsHash, uint256 unvestedAmount, uint64 endedAt
     );
 
     event VestForfeited(address indexed vest, uint256 unvestedAmount, uint64 endedAt);
@@ -121,6 +117,10 @@ contract BLOKCVestingFactory is Ownable2Step {
         if (treasury_ == address(0)) revert ZeroAddress();
         if (governance_ == address(0)) revert ZeroAddress();
         if (linearVestDuration_ == 0) revert InvalidDuration();
+        // Every vest sums cliff + linear into a uint64 total duration inside
+        // initialize; a wrapped sum would produce a schedule that never vests.
+        // Check in uint256 space so the addition itself cannot overflow.
+        if (uint256(cliffDuration_) + uint256(linearVestDuration_) > type(uint64).max) revert InvalidDuration();
         if (implementation_.code.length == 0) revert InvalidImplementation();
 
         implementation = implementation_;
@@ -170,18 +170,32 @@ contract BLOKCVestingFactory is Ownable2Step {
                 totalAmount
             );
 
-        // Verify initialize wrote the expected state; catches no-code / no-op implementations.
+        // Verify initialize wrote the expected state; catches no-code / no-op
+        // implementations and miswritten per-vest fields (beneficiary and the
+        // BCIP-001 flags) that the schedule checks would miss.
         {
             BLOKCVestingWallet w = BLOKCVestingWallet(payable(vest));
-            if (w.factory() != address(this) || w.token() != token || w.treasury() != treasury || w.totalAtStart() != totalAmount)
-                revert InvalidImplementation();
+            if (
+                w.factory() != address(this) || w.token() != token || w.treasury() != treasury
+                    || w.totalAtStart() != totalAmount || w.owner() != beneficiary || w.prePaid() != prePaid
+                    || w.terminationDisclosed() != terminationDisclosed
+            ) revert InvalidImplementation();
         }
 
         allVests.push(vest);
         _vestsByBeneficiary[beneficiary].push(vest);
         isVest[vest] = true;
 
-        emit VestCreated(vest, beneficiary, totalAmount, startTimestamp, cliffDuration, linearVestDuration, prePaid, terminationDisclosed);
+        emit VestCreated(
+            vest,
+            beneficiary,
+            totalAmount,
+            startTimestamp,
+            cliffDuration,
+            linearVestDuration,
+            prePaid,
+            terminationDisclosed
+        );
     }
 
     // ---------------------------------------------------------------------
@@ -197,12 +211,34 @@ contract BLOKCVestingFactory is Ownable2Step {
     /// @param vest         Address of the BLOKCVestingWallet clone.
     /// @param proposalRef  Aragon proposal hash that authorised this call.
     /// @param groundsHash  keccak of the published grounds text.
+    ///
+    ///         Anti-front-run note: for a guarantee that the beneficiary
+    ///         cannot pre-empt this with {forfeit} (which would erase the
+    ///         grounds hash from the on-chain record), first call
+    ///         {requestTermination} in a separate transaction and execute
+    ///         this afterwards.
     function terminateVest(address vest, bytes32 proposalRef, bytes32 groundsHash) external onlyOwner {
+        if (!isVest[vest]) revert NotRegisteredVest();
         BLOKCVestingWallet w = BLOKCVestingWallet(payable(vest));
         w.terminate(proposalRef, groundsHash);
         uint64 endTime = w.endedAt();
         uint256 unvested = w.totalAtStart() - w.vestedAmount(token, endTime);
         emit VestTerminated(vest, proposalRef, groundsHash, unvested, endTime);
+    }
+
+    /// @notice Reserve the termination path on `vest` ahead of {terminateVest}
+    ///         so the beneficiary cannot front-run with {forfeit}. Execute
+    ///         {terminateVest} in a later transaction; cancel via
+    ///         {cancelTerminationRequest} if governance changes its mind.
+    function requestTermination(address vest, bytes32 proposalRef, bytes32 groundsHash) external onlyOwner {
+        if (!isVest[vest]) revert NotRegisteredVest();
+        BLOKCVestingWallet(payable(vest)).requestTermination(proposalRef, groundsHash);
+    }
+
+    /// @notice Withdraw a pending termination request on `vest`.
+    function cancelTerminationRequest(address vest) external onlyOwner {
+        if (!isVest[vest]) revert NotRegisteredVest();
+        BLOKCVestingWallet(payable(vest)).cancelTerminationRequest();
     }
 
     /// @notice Guarded variant of {terminateVest} that enforces pre-cliff
@@ -223,6 +259,7 @@ contract BLOKCVestingFactory is Ownable2Step {
         bool requirePrecliff,
         uint64 notAfter
     ) external onlyOwner {
+        if (!isVest[vest]) revert NotRegisteredVest();
         BLOKCVestingWallet w = BLOKCVestingWallet(payable(vest));
         if (requirePrecliff && block.timestamp >= w.cliff()) revert PastCliff();
         if (notAfter != 0 && block.timestamp > notAfter) revert DeadlineExceeded();
@@ -230,6 +267,10 @@ contract BLOKCVestingFactory is Ownable2Step {
         if (unvested < minUnvested) revert InsufficientUnvested();
         w.terminate(proposalRef, groundsHash);
         uint64 endTime = w.endedAt();
+        // Source the event's unvested from post-termination state (same
+        // pattern as {terminateVest}) so the event always reflects the
+        // wallet's actual bookkeeping, not a pre-call estimate.
+        unvested = w.totalAtStart() - w.vestedAmount(token, endTime);
         emit VestTerminated(vest, proposalRef, groundsHash, unvested, endTime);
     }
 

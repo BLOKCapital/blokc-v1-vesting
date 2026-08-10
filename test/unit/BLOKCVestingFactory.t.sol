@@ -51,6 +51,21 @@ contract BLOKCVestingFactory_Constructor is BaseTest {
         assertEq(f.cliffDuration(), 0);
     }
 
+    function test_constructor_revertsOnDurationOverflow() public {
+        // cliff + linear must fit in uint64 — every vest's initialize sums
+        // them, and a wrapped total duration would never vest.
+        vm.expectRevert(BLOKCVestingFactory.InvalidDuration.selector);
+        new BLOKCVestingFactory(address(implementation), address(token), treasury, governance, type(uint64).max, 1);
+    }
+
+    function test_constructor_maxBoundaryDurationAllowed() public {
+        BLOKCVestingFactory f = new BLOKCVestingFactory(
+            address(implementation), address(token), treasury, governance, type(uint64).max - 1, 1
+        );
+        assertEq(f.cliffDuration(), type(uint64).max - 1);
+        assertEq(f.linearVestDuration(), 1);
+    }
+
     function test_constructor_revertsOnEOAImplementation() public {
         address eoa = makeAddr("eoa");
         vm.expectRevert(BLOKCVestingFactory.InvalidImplementation.selector);
@@ -63,7 +78,9 @@ contract BLOKCVestingFactory_CreateVest is BaseTest {
         uint64 startTs = uint64(block.timestamp);
 
         vm.expectEmit(false, true, false, true);
-        emit BLOKCVestingFactory.VestCreated(address(0), beneficiary, DEFAULT_AMOUNT, startTs, CLIFF, LINEAR, false, true);
+        emit BLOKCVestingFactory.VestCreated(
+            address(0), beneficiary, DEFAULT_AMOUNT, startTs, CLIFF, LINEAR, false, true
+        );
 
         vm.prank(governance);
         address vest = factory.createVest(beneficiary, DEFAULT_AMOUNT, startTs, false, true);
@@ -218,6 +235,27 @@ contract BLOKCVestingFactory_TerminateVest is BaseTest {
         vm.prank(governance);
         factory.terminateVestGuarded(address(vest), bytes32("p"), bytes32("g"), unvested, true, 0);
         assertTrue(vest.ended());
+    }
+
+    function test_terminateVest_revertsForUnregisteredVest() public {
+        address notAVest = makeAddr("notAVest");
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingFactory.NotRegisteredVest.selector);
+        factory.terminateVest(notAVest, bytes32("p"), bytes32("g"));
+    }
+
+    function test_terminateVestGuarded_revertsForUnregisteredVest() public {
+        address notAVest = makeAddr("notAVest");
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingFactory.NotRegisteredVest.selector);
+        factory.terminateVestGuarded(notAVest, bytes32("p"), bytes32("g"), 0, false, 0);
+    }
+
+    function test_requestTermination_revertsForUnregisteredVest() public {
+        address notAVest = makeAddr("notAVest");
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingFactory.NotRegisteredVest.selector);
+        factory.requestTermination(notAVest, bytes32("p"), bytes32("g"));
     }
 }
 

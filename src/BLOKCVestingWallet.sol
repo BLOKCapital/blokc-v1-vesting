@@ -50,13 +50,23 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
 
     uint256 public totalAtStart;
 
+    /// @notice Set by the factory via {requestTermination} to reserve the
+    ///         termination path ahead of {terminate}. While pending, the
+    ///         beneficiary cannot {forfeit}, preserving the {Terminated}
+    ///         event (with grounds hash) as the definitive on-chain record
+    ///         instead of a pre-emptive {Forfeited} event.
+    bool public terminationRequested;
+    bytes32 public pendingProposalRef;
+    bytes32 public pendingGroundsHash;
+
     // ---------------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------------
 
     event Terminated(uint256 unvestedReturnedToTreasury, uint64 endedAt, bytes32 proposalRef, bytes32 groundsHash);
     event Forfeited(uint256 unvestedReturnedToTreasury, uint64 endedAt);
-    event DelegateUpdated(address indexed previousDelegate, address indexed newDelegate);
+    event TerminationRequested(bytes32 proposalRef, bytes32 groundsHash);
+    event TerminationRequestCancelled();
 
     // ---------------------------------------------------------------------
     // Errors
@@ -74,6 +84,10 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     error RenounceDisabled();
     error OwnershipTransferDisabled();
     error EthNotSupported();
+    error Underfunded(uint256 actual, uint256 expected);
+    error TerminationPending();
+    error NoTerminationRequest();
+    error NotSupportedToken();
 
     // ---------------------------------------------------------------------
     // Constructor — disables initializers on the implementation contract
@@ -101,12 +115,16 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         bool prePaid_,
         bool terminationDisclosed_,
         uint256 totalAmount_
-    ) external initializer {
+    ) external initializer nonReentrant {
         if (factory_ == address(0)) revert ZeroAddress();
         if (token_ == address(0)) revert ZeroAddress();
         if (treasury_ == address(0)) revert ZeroAddress();
         if (beneficiary_ == address(0)) revert ZeroAddress();
         if (linearVestDuration_ == 0) revert InvalidDuration();
+        // The sum is stored in uint64 via __VestingWallet_init; a wrapped
+        // total duration would produce a schedule that never vests. Checked
+        // in uint256 space so the addition itself cannot overflow.
+        if (uint256(cliffDuration_) + uint256(linearVestDuration_) > type(uint64).max) revert InvalidDuration();
 
         uint64 totalDuration = cliffDuration_ + linearVestDuration_;
         __VestingWallet_init(beneficiary_, startTimestamp_, totalDuration);
@@ -120,14 +138,26 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         totalAtStart = totalAmount_;
 
         // Sweep any pre-existing surplus so delegated votes equal exactly totalAmount_.
-        uint256 bal = IERC20(token_).balanceOf(address(this));
-        if (bal > totalAmount_) {
-            IERC20(token_).safeTransfer(treasury_, bal - totalAmount_);
-        }
+        // A deficit (fee-on-transfer token delivering less than promised) would
+        // overstate totalAtStart against the actual balance and eventually
+        // brick release() — reject it instead.
+        _sweepSurplusOrRevert(token_, treasury_, totalAmount_);
 
         // Day-one voting power: the wallet's $BLOKC balance accrues votes to
         // the beneficiary on Aragon TokenVoting from this block forward.
         IVotes(token_).delegate(beneficiary_);
+    }
+
+    /// @notice Returns any pre-existing balance above `expected` to the
+    ///         treasury; reverts if the wallet holds less than `expected`
+    ///         (e.g. a fee-on-transfer token under-delivered the funding).
+    function _sweepSurplusOrRevert(address token_, address treasury_, uint256 expected) internal {
+        uint256 bal = IERC20(token_).balanceOf(address(this));
+        if (bal > expected) {
+            IERC20(token_).safeTransfer(treasury_, bal - expected);
+        } else if (bal < expected) {
+            revert Underfunded(bal, expected);
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -168,6 +198,37 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     // Termination — DAO-initiated, factory-routed
     // ---------------------------------------------------------------------
 
+    /// @notice Reserve the termination path ahead of {terminate}. Called by
+    ///         the factory in a separate transaction so a pending DAO
+    ///         termination cannot be pre-empted by the beneficiary's
+    ///         {forfeit} — which would erase the {Terminated} event and its
+    ///         grounds hash from the on-chain record. Enforces the same
+    ///         guards as {terminate}; once pending, only the factory can
+    ///         {terminate} or {cancelTerminationRequest}.
+    /// @param proposalRef Aragon proposal hash that authorised this request.
+    /// @param groundsHash keccak of the published grounds text.
+    function requestTermination(bytes32 proposalRef, bytes32 groundsHash) external onlyFactory {
+        if (prePaid) revert InvestorVestNonTerminable();
+        if (!terminationDisclosed) revert TerminationNotDisclosed();
+        if (ended) revert AlreadyEnded();
+        if (totalAtStart - _vestingSchedule(totalAtStart, uint64(block.timestamp)) == 0) revert AlreadyMatured();
+
+        terminationRequested = true;
+        pendingProposalRef = proposalRef;
+        pendingGroundsHash = groundsHash;
+        emit TerminationRequested(proposalRef, groundsHash);
+    }
+
+    /// @notice Withdraw a pending termination request (governance changed its
+    ///         mind before executing). Only the factory may call.
+    function cancelTerminationRequest() external onlyFactory {
+        if (!terminationRequested) revert NoTerminationRequest();
+        terminationRequested = false;
+        pendingProposalRef = bytes32(0);
+        pendingGroundsHash = bytes32(0);
+        emit TerminationRequestCancelled();
+    }
+
     /// @notice End the vest by DAO action. Returns the unvested portion to
     ///         the treasury; already-vested tokens remain claimable by the
     ///         beneficiary via {release}. Reverts unconditionally for
@@ -186,6 +247,11 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         uint64 endTime = uint64(block.timestamp);
         ended = true;
         endedAt = endTime;
+        // A pending request is fulfilled by this termination; clear it so the
+        // vest returns to a clean (ended) state.
+        terminationRequested = false;
+        pendingProposalRef = bytes32(0);
+        pendingGroundsHash = bytes32(0);
 
         uint256 vestedAmt = _vestingSchedule(totalAtStart, endTime);
         uint256 unvested = totalAtStart - vestedAmt;
@@ -213,10 +279,16 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     ///         Reverts post-maturity (all tokens already vested) to prevent
     ///         misleading forfeit events with unvested == 0.
     ///
+    ///         Reverts while a termination request is pending
+    ///         ({terminationRequested}) so the beneficiary cannot front-run a
+    ///         DAO termination and erase the grounds hash from the on-chain
+    ///         record.
+    ///
     ///         On success, calls {IBLOKCVestingFactory.notifyForfeit} so the
     ///         factory emits a single-source-of-truth event for indexers.
     function forfeit() external onlyBeneficiary nonReentrant {
         if (prePaid) revert InvestorVestNonForfeitable();
+        if (terminationRequested) revert TerminationPending();
         if (ended) revert AlreadyEnded();
         if (totalAtStart - _vestingSchedule(totalAtStart, uint64(block.timestamp)) == 0) revert AlreadyMatured();
 
@@ -241,9 +313,13 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     // ---------------------------------------------------------------------
 
     /// @notice Release the vested $BLOKC to the beneficiary. Anyone can call
-    ///         this; funds always go to {owner}. Reentrancy-guarded as
-    ///         defence-in-depth around the underlying ERC20 transfer.
+    ///         this; funds always go to {owner}. Reverts for any token other
+    ///         than the configured $BLOKC — silently releasing 0 for an
+    ///         unrecognized token would mislead generic OZ integrations.
+    ///         Reentrancy-guarded as defence-in-depth around the underlying
+    ///         ERC20 transfer.
     function release(address tkn) public virtual override nonReentrant {
+        if (tkn != token) revert NotSupportedToken();
         super.release(tkn);
     }
 
@@ -263,8 +339,12 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         super.release(token);
     }
 
-    function vestedAmount(uint64) public pure override returns (uint256) {
-        return 0;
+    /// @notice No-arg vestedAmount routes to the ERC20 path so generic OZ
+    ///         integrations that query the no-arg overload see the $BLOKC
+    ///         value instead of 0. (The base ETH path is dead — ETH is
+    ///         rejected via {receive}.)
+    function vestedAmount(uint64 timestamp) public view override returns (uint256) {
+        return vestedAmount(token, timestamp);
     }
 
     /// @notice Returns the ERC20 $BLOKC amount currently claimable, so no-arg
@@ -293,19 +373,6 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     ///         `_vestsByBeneficiary` registry authoritative.
     function transferOwnership(address) public view override {
         revert OwnershipTransferDisabled();
-    }
-
-    // ---------------------------------------------------------------------
-    // Governance delegation rotation
-    // ---------------------------------------------------------------------
-
-    /// @notice Re-delegates the vest's voting power to a new address.
-    ///         Only the beneficiary can call this. Emits {DelegateUpdated}.
-    function updateDelegate(address newDelegate) external onlyBeneficiary {
-        if (newDelegate == address(0)) revert ZeroAddress();
-        address previous = IVotes(token).delegates(address(this));
-        IVotes(token).delegate(newDelegate);
-        emit DelegateUpdated(previous, newDelegate);
     }
 
     // ---------------------------------------------------------------------
