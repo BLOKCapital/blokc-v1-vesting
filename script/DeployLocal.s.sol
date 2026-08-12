@@ -24,9 +24,8 @@ contract DeployLocal is Script {
         vm.startBroadcast();
         MockBLOKC token = new MockBLOKC();
         BLOKCVestingWallet implementation = new BLOKCVestingWallet();
-        BLOKCVestingFactory factory = new BLOKCVestingFactory(
-            address(implementation), address(token), TREASURY, GOVERNANCE, cliff, linear
-        );
+        BLOKCVestingFactory factory =
+            new BLOKCVestingFactory(address(implementation), address(token), TREASURY, GOVERNANCE, cliff, linear);
         token.mint(TREASURY, 1_000_000_000 ether);
         vm.stopBroadcast();
 

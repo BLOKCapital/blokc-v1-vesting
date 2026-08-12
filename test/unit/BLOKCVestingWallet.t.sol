@@ -76,8 +76,16 @@ contract BLOKCVestingWallet_Initialize is BaseTest {
         vm.prank(alice);
         vm.expectRevert(BLOKCVestingWallet.NotFactory.selector);
         vest.initialize(
-            address(factory), address(token), treasury, beneficiary, uint64(block.timestamp), CLIFF, LINEAR, false,
-            true, 1 ether
+            address(factory),
+            address(token),
+            treasury,
+            beneficiary,
+            uint64(block.timestamp),
+            CLIFF,
+            LINEAR,
+            false,
+            true,
+            1 ether
         );
     }
 
@@ -88,7 +96,15 @@ contract BLOKCVestingWallet_Initialize is BaseTest {
         vm.prank(address(factory));
         vm.expectRevert(BLOKCVestingWallet.InvalidDuration.selector);
         vest.initialize(
-            address(factory), address(token), treasury, beneficiary, type(uint64).max - 1, CLIFF, LINEAR, false, true,
+            address(factory),
+            address(token),
+            treasury,
+            beneficiary,
+            type(uint64).max - 1,
+            CLIFF,
+            LINEAR,
+            false,
+            true,
             1 ether
         );
     }
@@ -514,10 +530,7 @@ contract BLOKCVestingWallet_TerminationRequest is BaseTest {
     function test_requestTermination_setsDeadline() public {
         vm.prank(governance);
         factory.requestTermination(address(vest), bytes32("p"), bytes32("g"));
-        assertEq(
-            vest.terminationRequestDeadline(),
-            uint64(block.timestamp) + vest.TERMINATION_REQUEST_WINDOW()
-        );
+        assertEq(vest.terminationRequestDeadline(), uint64(block.timestamp) + vest.TERMINATION_REQUEST_WINDOW());
     }
 
     function test_forfeit_allowedAfterRequestExpiry() public {
