@@ -30,6 +30,12 @@ contract DeployLocal is Script {
         token.mint(TREASURY, 1_000_000_000 ether);
         vm.stopBroadcast();
 
+        // createVest pulls funding via safeTransferFrom(treasury, ...), so the
+        // treasury must pre-approve the factory. Signed with the treasury key.
+        vm.startBroadcast(TREASURY_PK);
+        token.approve(address(factory), type(uint256).max);
+        vm.stopBroadcast();
+
         console.log("TOKEN=%s", address(token));
         console.log("IMPLEMENTATION=%s", address(implementation));
         console.log("FACTORY=%s", address(factory));

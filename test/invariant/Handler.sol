@@ -86,7 +86,10 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         BLOKCVestingWallet vest = _pickVest(vestSeed);
         if (address(vest) == address(0)) return;
 
+        // release is beneficiary-only (an unauthenticated claim would destroy
+        // the released tokens' delegated votes at address(0)).
         uint256 before = token.balanceOf(vest.owner());
+        vm.prank(vest.owner());
         try vest.release(address(token)) {
             totalReleased += token.balanceOf(vest.owner()) - before;
         } catch {}
@@ -96,10 +99,16 @@ contract Handler is CommonBase, StdCheats, StdUtils {
         BLOKCVestingWallet vest = _pickVest(vestSeed);
         if (address(vest) == address(0)) return;
 
+        // Termination requires a pending request (the two-step flow is
+        // mandatory), so request first with the same refs. The request may
+        // itself revert (matured/ended/investor) — swallow and skip.
         uint256 treasuryBefore = token.balanceOf(treasury);
         vm.prank(governance);
-        try factory.terminateVest(address(vest), proposalRef, groundsHash) {
-            totalReturnedToTreasury += token.balanceOf(treasury) - treasuryBefore;
+        try factory.requestTermination(address(vest), proposalRef, groundsHash) {
+            vm.prank(governance);
+            try factory.terminateVest(address(vest), proposalRef, groundsHash) {
+                totalReturnedToTreasury += token.balanceOf(treasury) - treasuryBefore;
+            } catch {}
         } catch {}
     }
 

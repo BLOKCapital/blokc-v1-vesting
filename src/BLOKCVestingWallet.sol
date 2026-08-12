@@ -59,6 +59,16 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     bytes32 public pendingProposalRef;
     bytes32 public pendingGroundsHash;
 
+    /// @notice Absolute expiry of the pending termination request. A request
+    ///         governance neither fulfils nor cancels expires after
+    ///         {TERMINATION_REQUEST_WINDOW}, unblocking the beneficiary's
+    ///         {forfeit} so an abandoned request cannot suspend it forever.
+    uint64 public terminationRequestDeadline;
+
+    /// @notice How long a pending termination request stays valid. The DAO
+    ///         must fulfil it (or re-request) within this window.
+    uint64 public constant TERMINATION_REQUEST_WINDOW = 30 days;
+
     // ---------------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------------
@@ -87,6 +97,8 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     error Underfunded(uint256 actual, uint256 expected);
     error TerminationPending();
     error NoTerminationRequest();
+    error TerminationRefsMismatch();
+    error TerminationRequestExpired();
     error NotSupportedToken();
 
     // ---------------------------------------------------------------------
@@ -125,6 +137,14 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         // total duration would produce a schedule that never vests. Checked
         // in uint256 space so the addition itself cannot overflow.
         if (uint256(cliffDuration_) + uint256(linearVestDuration_) > type(uint64).max) revert InvalidDuration();
+        // The cliff timestamp is also a uint64 addition (start + cliff); a
+        // wrapped sum silently produces a schedule that has already started.
+        // Same uint256-space check.
+        if (uint256(startTimestamp_) + uint256(cliffDuration_) > type(uint64).max) revert InvalidDuration();
+        // Only the deploying factory may initialize a clone. Clones are
+        // created and initialized atomically inside {createVest}, so this
+        // gate is defense-in-depth against any future caller.
+        if (msg.sender != factory_) revert NotFactory();
 
         uint64 totalDuration = cliffDuration_ + linearVestDuration_;
         __VestingWallet_init(beneficiary_, startTimestamp_, totalDuration);
@@ -155,9 +175,37 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         uint256 bal = IERC20(token_).balanceOf(address(this));
         if (bal > expected) {
             IERC20(token_).safeTransfer(treasury_, bal - expected);
+            // Re-check after the sweep: a fee-on-transfer token that taxes
+            // the sweep transfer would otherwise leave the wallet short of
+            // the promised funding with no error.
+            uint256 balAfter = IERC20(token_).balanceOf(address(this));
+            if (balAfter < expected) revert Underfunded(balAfter, expected);
         } else if (bal < expected) {
             revert Underfunded(bal, expected);
         }
+    }
+
+    /// @notice Returns any balance above the amount the vest should hold —
+    ///         the curve-tracked remainder — to the treasury. Post-init
+    ///         donations would otherwise be permanently locked (every value
+    ///         path is anchored to {totalAtStart}) and keep inflating the
+    ///         beneficiary's delegated votes, since the wallet's balance is
+    ///         the IVotes vote ledger. No-op when the wallet holds exactly
+    ///         the expected amount or less (e.g. outbound transfer fees).
+    function _sweepExcess() internal {
+        uint256 expected =
+            ended ? _vestingSchedule(totalAtStart, endedAt) - released(token) : totalAtStart - released(token);
+        uint256 bal = IERC20(token).balanceOf(address(this));
+        if (bal > expected) {
+            IERC20(token).safeTransfer(treasury, bal - expected);
+        }
+    }
+
+    /// @notice Anyone can route a post-init surplus (direct $BLOKC transfers
+    ///         to this vest) back to the treasury, un-trapping the tokens and
+    ///         deflating the balance-driven delegated votes.
+    function recoverSurplus() external nonReentrant {
+        _sweepExcess();
     }
 
     // ---------------------------------------------------------------------
@@ -214,6 +262,7 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         if (totalAtStart - _vestingSchedule(totalAtStart, uint64(block.timestamp)) == 0) revert AlreadyMatured();
 
         terminationRequested = true;
+        terminationRequestDeadline = uint64(block.timestamp) + TERMINATION_REQUEST_WINDOW;
         pendingProposalRef = proposalRef;
         pendingGroundsHash = groundsHash;
         emit TerminationRequested(proposalRef, groundsHash);
@@ -224,6 +273,7 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     function cancelTerminationRequest() external onlyFactory {
         if (!terminationRequested) revert NoTerminationRequest();
         terminationRequested = false;
+        terminationRequestDeadline = 0;
         pendingProposalRef = bytes32(0);
         pendingGroundsHash = bytes32(0);
         emit TerminationRequestCancelled();
@@ -238,10 +288,21 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     /// @param proposalRef Aragon proposal hash that authorised this call.
     /// @param groundsHash keccak of the published grounds text. Pinned on
     ///        chain so a future audit can detect grounds-text tampering.
+    ///        Must match the refs committed by the pending {requestTermination}.
     function terminate(bytes32 proposalRef, bytes32 groundsHash) external onlyFactory nonReentrant {
         if (prePaid) revert InvestorVestNonTerminable();
         if (!terminationDisclosed) revert TerminationNotDisclosed();
         if (ended) revert AlreadyEnded();
+        // Termination requires a pending request: the two-step
+        // {requestTermination} → {terminate} flow is mandatory so the
+        // beneficiary cannot pre-empt a single-step termination with
+        // {forfeit} and erase the grounds-hash record.
+        if (!terminationRequested) revert NoTerminationRequest();
+        // The grounds pinned on-chain must be the ones the request committed
+        // to; silently accepting different refs would void the anti-tamper
+        // guarantee the request mechanism exists for.
+        if (proposalRef != pendingProposalRef || groundsHash != pendingGroundsHash) revert TerminationRefsMismatch();
+        if (block.timestamp > terminationRequestDeadline) revert TerminationRequestExpired();
         if (totalAtStart - _vestingSchedule(totalAtStart, uint64(block.timestamp)) == 0) revert AlreadyMatured();
 
         uint64 endTime = uint64(block.timestamp);
@@ -250,6 +311,7 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         // A pending request is fulfilled by this termination; clear it so the
         // vest returns to a clean (ended) state.
         terminationRequested = false;
+        terminationRequestDeadline = 0;
         pendingProposalRef = bytes32(0);
         pendingGroundsHash = bytes32(0);
 
@@ -259,6 +321,9 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         if (unvested > 0) {
             IERC20(token).safeTransfer(treasury, unvested);
         }
+        // Return any post-init surplus (direct transfers to this vest) along
+        // with the unvested portion, so donated tokens do not stay trapped.
+        _sweepExcess();
 
         emit Terminated(unvested, endTime, proposalRef, groundsHash);
     }
@@ -288,7 +353,10 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     ///         factory emits a single-source-of-truth event for indexers.
     function forfeit() external onlyBeneficiary nonReentrant {
         if (prePaid) revert InvestorVestNonForfeitable();
-        if (terminationRequested) revert TerminationPending();
+        // An *expired* request no longer blocks forfeit — a request that
+        // governance neither fulfilled nor cancelled within the window must
+        // not suspend the beneficiary's right forever.
+        if (terminationRequested && block.timestamp <= terminationRequestDeadline) revert TerminationPending();
         if (ended) revert AlreadyEnded();
         if (totalAtStart - _vestingSchedule(totalAtStart, uint64(block.timestamp)) == 0) revert AlreadyMatured();
 
@@ -302,6 +370,9 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         if (unvested > 0) {
             IERC20(token).safeTransfer(treasury, unvested);
         }
+        // Return any post-init surplus (direct transfers to this vest) along
+        // with the unvested portion, so donated tokens do not stay trapped.
+        _sweepExcess();
 
         IBLOKCVestingFactory(factory).notifyForfeit(unvested);
 
@@ -312,14 +383,20 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     // Claim — pause-free, reentrancy-guarded
     // ---------------------------------------------------------------------
 
-    /// @notice Release the vested $BLOKC to the beneficiary. Anyone can call
-    ///         this; funds always go to {owner}. Reverts for any token other
-    ///         than the configured $BLOKC — silently releasing 0 for an
-    ///         unrecognized token would mislead generic OZ integrations.
-    ///         Reentrancy-guarded as defence-in-depth around the underlying
-    ///         ERC20 transfer.
-    function release(address tkn) public virtual override nonReentrant {
+    /// @notice Release the vested $BLOKC to the beneficiary. Beneficiary-only:
+    ///         an unauthenticated release would move the released tokens'
+    ///         delegated votes to the beneficiary's own delegate — address(0)
+    ///         unless they self-delegate — permanently destroying voting power
+    ///         the BCIP-001 weight formula expects. Beneficiaries who want
+    ///         their claimed tokens to keep voting should self-delegate
+    ///         ($BLOKC.delegate(beneficiary)) so released votes follow them.
+    ///         Reverts for any token other than the configured $BLOKC —
+    ///         silently releasing 0 for an unrecognized token would mislead
+    ///         generic OZ integrations. Reentrancy-guarded as defence-in-depth
+    ///         around the underlying ERC20 transfer.
+    function release(address tkn) public virtual override onlyBeneficiary nonReentrant {
         if (tkn != token) revert NotSupportedToken();
+        _sweepExcess();
         super.release(tkn);
     }
 
@@ -335,7 +412,8 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
 
     /// @notice No-arg release routes to the ERC20 path so generic OZ
     ///         integrations work correctly without knowing the token address.
-    function release() public virtual override nonReentrant {
+    function release() public virtual override onlyBeneficiary nonReentrant {
+        _sweepExcess();
         super.release(token);
     }
 

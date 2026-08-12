@@ -122,8 +122,12 @@ contract BLOKCVestingWalletFuzz is BaseTest {
         uint256 vestedBefore = vest.vested();
         uint256 treasuryBefore = token.balanceOf(treasury);
 
-        // Terminate via the registered factory of this clone.
+        // Terminate via the registered factory of this clone. The two-step
+        // flow is mandatory: request first, then terminate with the same refs
+        // (request and terminate share the warped block, inside the window).
         address f = vest.factory();
+        vm.prank(governance);
+        BLOKCVestingFactoryFresh(f).requestTermination(address(vest), bytes32("p"), bytes32("g"));
         vm.prank(governance);
         BLOKCVestingFactoryFresh(f).terminateVest(address(vest), bytes32("p"), bytes32("g"));
 
@@ -172,7 +176,7 @@ contract BLOKCVestingWalletFuzz is BaseTest {
         uint256 paid;
         while (elapsed <= totalDuration) {
             vm.warp(uint256(startTs) + elapsed);
-            vm.prank(alice); // anyone can call; beneficiary receives
+            vm.prank(beneficiary); // release is beneficiary-only
             vest.release(address(token));
             paid = token.balanceOf(beneficiary);
             // vest.vested() reads block.timestamp inside the wallet — avoids
@@ -183,6 +187,7 @@ contract BLOKCVestingWalletFuzz is BaseTest {
         }
         // After end, the full amount should have been paid out.
         vm.warp(uint256(startTs) + totalDuration + 1);
+        vm.prank(beneficiary);
         vest.release(address(token));
         assertEq(token.balanceOf(beneficiary), amount);
     }

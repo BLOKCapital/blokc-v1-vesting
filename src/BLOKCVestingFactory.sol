@@ -90,6 +90,8 @@ contract BLOKCVestingFactory is Ownable2Step {
     error PastCliff();
     error DeadlineExceeded();
     error InsufficientUnvested();
+    error AlreadyEnded();
+    error InvalidUnvestedAmount();
 
     // ---------------------------------------------------------------------
     // Constructor
@@ -171,14 +173,19 @@ contract BLOKCVestingFactory is Ownable2Step {
             );
 
         // Verify initialize wrote the expected state; catches no-code / no-op
-        // implementations and miswritten per-vest fields (beneficiary and the
-        // BCIP-001 flags) that the schedule checks would miss.
+        // implementations and miswritten per-vest fields (beneficiary, the
+        // BCIP-001 flags, and the schedule timestamps) that the schedule
+        // checks would miss. An implementation that echoes the checked fields
+        // but leaves, e.g., ended = true or a zero duration passes nothing
+        // here — it is rejected before registration.
         {
             BLOKCVestingWallet w = BLOKCVestingWallet(payable(vest));
             if (
                 w.factory() != address(this) || w.token() != token || w.treasury() != treasury
                     || w.totalAtStart() != totalAmount || w.owner() != beneficiary || w.prePaid() != prePaid
-                    || w.terminationDisclosed() != terminationDisclosed
+                    || w.terminationDisclosed() != terminationDisclosed || w.start() != startTimestamp
+                    || w.cliff() != uint256(startTimestamp) + uint256(cliffDuration)
+                    || w.duration() != uint256(cliffDuration) + uint256(linearVestDuration) || w.ended()
             ) revert InvalidImplementation();
         }
 
@@ -206,17 +213,21 @@ contract BLOKCVestingFactory is Ownable2Step {
     ///         The wallet enforces:
     ///           - investor (prePaid) vests revert unconditionally
     ///           - vests where terminationDisclosed == false revert
+    ///           - vests without a pending {requestTermination} revert
+    ///             (the two-step flow is mandatory — see below)
     ///           - already-ended vests revert
     ///           - fully matured vests revert (AlreadyMatured)
     /// @param vest         Address of the BLOKCVestingWallet clone.
     /// @param proposalRef  Aragon proposal hash that authorised this call.
     /// @param groundsHash  keccak of the published grounds text.
     ///
-    ///         Anti-front-run note: for a guarantee that the beneficiary
-    ///         cannot pre-empt this with {forfeit} (which would erase the
-    ///         grounds hash from the on-chain record), first call
-    ///         {requestTermination} in a separate transaction and execute
-    ///         this afterwards.
+    ///         Anti-front-run guarantee: {requestTermination} must be called
+    ///         in a separate transaction first, with the same
+    ///         proposalRef/groundsHash passed here. The wallet rejects
+    ///         terminations without a pending request and terminations whose
+    ///         refs differ from the committed ones, so the beneficiary cannot
+    ///         pre-empt the termination with {forfeit} and erase the grounds
+    ///         hash from the on-chain record.
     function terminateVest(address vest, bytes32 proposalRef, bytes32 groundsHash) external onlyOwner {
         if (!isVest[vest]) revert NotRegisteredVest();
         BLOKCVestingWallet w = BLOKCVestingWallet(payable(vest));
@@ -261,6 +272,10 @@ contract BLOKCVestingFactory is Ownable2Step {
     ) external onlyOwner {
         if (!isVest[vest]) revert NotRegisteredVest();
         BLOKCVestingWallet w = BLOKCVestingWallet(payable(vest));
+        // Fail fast on an already-ended vest: the curve-based estimate below
+        // reads the frozen post-end value and could pass minUnvested before
+        // the wallet rejects the call, wasting a governance proposal execution.
+        if (w.ended()) revert AlreadyEnded();
         if (requirePrecliff && block.timestamp >= w.cliff()) revert PastCliff();
         if (notAfter != 0 && block.timestamp > notAfter) revert DeadlineExceeded();
         uint256 unvested = w.totalAtStart() - w.vestedAmount(token, uint64(block.timestamp));
@@ -281,10 +296,18 @@ contract BLOKCVestingFactory is Ownable2Step {
     /// @notice Callback used by {BLOKCVestingWallet.forfeit} so the factory
     ///         emits a single-source-of-truth event for the dashboard /
     ///         indexer. msg.sender must be a clone deployed by this factory.
+    ///         The emitted amount is derived from the vest's own bookkeeping
+    ///         and cross-checked against the caller-supplied value, so a
+    ///         future code path (or corrupted clone) cannot forge the feed.
     function notifyForfeit(uint256 unvestedAmount) external {
         if (!isVest[msg.sender]) revert NotRegisteredVest();
-        uint64 endTime = BLOKCVestingWallet(payable(msg.sender)).endedAt();
-        emit VestForfeited(msg.sender, unvestedAmount, endTime);
+        BLOKCVestingWallet w = BLOKCVestingWallet(payable(msg.sender));
+        // A live vest reports endedAt() == 0 → vested 0 → computed unvested
+        // == totalAtStart, which no real forfeit amount can match — so this
+        // comparison also implies the vest actually ended.
+        uint256 unvested = w.totalAtStart() - w.vestedAmount(token, w.endedAt());
+        if (unvestedAmount != unvested) revert InvalidUnvestedAmount();
+        emit VestForfeited(msg.sender, unvested, w.endedAt());
     }
 
     // ---------------------------------------------------------------------
@@ -313,6 +336,13 @@ contract BLOKCVestingFactory is Ownable2Step {
     ///         vest registered to `user` at creation. Combined with
     ///         IERC20(token).balanceOf(user) this is the BCIP-001 voting
     ///         weight: wallet balance + unclaimed allocation across vests.
+    ///
+    ///         IMPORTANT: this channel is an ALTERNATIVE to, not additive
+    ///         with, the delegated votes the wallet balances already accrue
+    ///         to the beneficiary on Aragon TokenVoting (the wallet's
+    ///         `initialize` delegates its full balance). Summing both
+    ///         double-counts every vest token. Each integration must pick
+    ///         exactly one channel.
     ///
     ///         O(n) external calls in n = vests held by the user. Intended
     ///         for off-chain consumption (eth_call) and Aragon snapshot

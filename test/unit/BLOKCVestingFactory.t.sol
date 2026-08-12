@@ -132,6 +132,15 @@ contract BLOKCVestingFactory_CreateVest is BaseTest {
         factory.createVest(beneficiary, 0, uint64(block.timestamp), false, true);
     }
 
+    function test_createVest_revertsOnStartTimestampOverflow() public {
+        // startTimestamp + cliff is stored as a uint64 sum; a wrapped sum
+        // silently produces a schedule that has already started. The wallet's
+        // initialize rejects it, rolling back the whole creation.
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingWallet.InvalidDuration.selector);
+        factory.createVest(beneficiary, DEFAULT_AMOUNT, type(uint64).max - 1, false, true);
+    }
+
     function test_createVest_revertsWhenTreasuryNotApproved() public {
         // Drop the approval set in BaseTest.
         vm.prank(treasury);
@@ -189,11 +198,14 @@ contract BLOKCVestingFactory_TerminateVest is BaseTest {
     }
 
     function test_terminateVest_emitsAndForwards() public {
-        uint64 warpTo = uint64(block.timestamp) + CLIFF + LINEAR / 2;
-        vm.warp(warpTo);
-
         bytes32 proposalRef = keccak256("proposal");
         bytes32 groundsHash = keccak256("grounds");
+
+        // Request must be made within the 30-day window, so warp first.
+        uint64 warpTo = uint64(block.timestamp) + CLIFF + LINEAR / 2;
+        vm.warp(warpTo);
+        vm.prank(governance);
+        factory.requestTermination(address(vest), proposalRef, groundsHash);
 
         uint256 unvestedAmount = vest.totalAtStart() - vest.vested();
 
@@ -208,13 +220,18 @@ contract BLOKCVestingFactory_TerminateVest is BaseTest {
     }
 
     function test_terminateVestGuarded_revertsWhenPastCliff() public {
+        // Request must be made within the 30-day window, so warp first.
         vm.warp(block.timestamp + CLIFF + 1);
+        vm.prank(governance);
+        factory.requestTermination(address(vest), bytes32("p"), bytes32("g"));
         vm.prank(governance);
         vm.expectRevert(BLOKCVestingFactory.PastCliff.selector);
         factory.terminateVestGuarded(address(vest), bytes32("p"), bytes32("g"), 0, true, 0);
     }
 
     function test_terminateVestGuarded_revertsWhenPastDeadline() public {
+        vm.prank(governance);
+        factory.requestTermination(address(vest), bytes32("p"), bytes32("g"));
         uint64 deadline = uint64(block.timestamp) - 1;
         vm.prank(governance);
         vm.expectRevert(BLOKCVestingFactory.DeadlineExceeded.selector);
@@ -222,7 +239,10 @@ contract BLOKCVestingFactory_TerminateVest is BaseTest {
     }
 
     function test_terminateVestGuarded_revertsWhenInsufficientUnvested() public {
+        // Request must be made within the 30-day window, so warp first.
         vm.warp(block.timestamp + CLIFF + LINEAR / 2);
+        vm.prank(governance);
+        factory.requestTermination(address(vest), bytes32("p"), bytes32("g"));
         uint256 unvested = vest.totalAtStart() - vest.vested();
         vm.prank(governance);
         vm.expectRevert(BLOKCVestingFactory.InsufficientUnvested.selector);
@@ -231,10 +251,22 @@ contract BLOKCVestingFactory_TerminateVest is BaseTest {
 
     function test_terminateVestGuarded_happyPath_preCliff() public {
         // Terminates pre-cliff with full unvested balance.
+        vm.prank(governance);
+        factory.requestTermination(address(vest), bytes32("p"), bytes32("g"));
         uint256 unvested = vest.totalAtStart(); // pre-cliff: all unvested
         vm.prank(governance);
         factory.terminateVestGuarded(address(vest), bytes32("p"), bytes32("g"), unvested, true, 0);
         assertTrue(vest.ended());
+    }
+
+    function test_terminateVestGuarded_revertsWhenEnded() public {
+        // Fail fast on an ended vest instead of letting the frozen curve
+        // estimate pass minUnvested before the wallet rejects the call.
+        vm.prank(beneficiary);
+        vest.forfeit();
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingFactory.AlreadyEnded.selector);
+        factory.terminateVestGuarded(address(vest), bytes32("p"), bytes32("g"), 0, false, 0);
     }
 
     function test_terminateVest_revertsForUnregisteredVest() public {
@@ -330,6 +362,7 @@ contract BLOKCVestingFactory_UnclaimedAllocation is BaseTest {
         vm.warp(block.timestamp + CLIFF + LINEAR / 2); // ~62.5% vested
 
         uint256 expectedVested = vest.vested();
+        vm.prank(beneficiary);
         vest.release(address(token));
 
         assertEq(factory.unclaimedAllocation(beneficiary), DEFAULT_AMOUNT - expectedVested);

@@ -16,8 +16,16 @@ contract DeployAll is Script {
         address token = vm.envAddress("BLOKC_TOKEN");
         address treasury = vm.envAddress("TREASURY_ADDRESS");
         address governance = vm.envAddress("GOVERNANCE_ADDRESS");
-        uint64 cliffDuration = uint64(vm.envUint("CLIFF_DURATION"));
-        uint64 linearVestDuration = uint64(vm.envUint("LINEAR_VEST_DURATION"));
+        // Validate before the narrowing cast: a wrapped value would silently
+        // truncate into a tiny valid duration and bypass the factory
+        // constructor's overflow guard.
+        uint256 cliffEnv = vm.envUint("CLIFF_DURATION");
+        uint256 linearEnv = vm.envUint("LINEAR_VEST_DURATION");
+        if (cliffEnv > type(uint64).max || linearEnv > type(uint64).max) {
+            revert("CLIFF_DURATION / LINEAR_VEST_DURATION must fit in uint64");
+        }
+        uint64 cliffDuration = uint64(cliffEnv);
+        uint64 linearVestDuration = uint64(linearEnv);
 
         vm.startBroadcast();
         implementation = new BLOKCVestingWallet();
