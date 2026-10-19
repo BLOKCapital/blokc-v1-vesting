@@ -13,7 +13,7 @@ import {IVotes} from "@openzeppelin/contracts/governance/utils/IVotes.sol";
 /// @notice Minimal callback interface used by the wallet to notify the
 ///         factory on forfeit so dashboards/indexers see a single feed.
 interface IBLOKCVestingFactory {
-    function notifyForfeit(uint256 unvestedAmount) external;
+    function notifyForfeit() external;
 }
 
 /**
@@ -25,8 +25,9 @@ interface IBLOKCVestingFactory {
  *         12mo cliff of a 48mo total schedule unlocks 25% at month 12, then
  *         linearly to 100% at month 48), prePaid flag separating builder from
  *         investor vests, terminationDisclosed gate on DAO termination,
- *         voluntary forfeiture (builders only), and day-one voting power via
- *         IVotes delegation.
+ *         voluntary forfeiture (non-disclosed builder vests only — disclosed
+ *         vests are DAO-termination-only so the grounds record cannot be
+ *         pre-empted), and day-one voting power via IVotes delegation.
  *
  *         Deployed as an EIP-1167 minimal proxy clone by BLOKCVestingFactory.
  *         The factory is the only authorized caller of {terminate}.
@@ -51,22 +52,25 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     uint256 public totalAtStart;
 
     /// @notice Set by the factory via {requestTermination} to reserve the
-    ///         termination path ahead of {terminate}. While pending, the
-    ///         beneficiary cannot {forfeit}, preserving the {Terminated}
-    ///         event (with grounds hash) as the definitive on-chain record
-    ///         instead of a pre-emptive {Forfeited} event.
+    ///         termination path ahead of {terminate}. While pending, only
+    ///         {terminate} (or {cancelTerminationRequest}) can resolve it;
+    ///         disclosed vests cannot {forfeit} at all, so the {Terminated}
+    ///         event with its grounds hash can never be pre-empted.
     bool public terminationRequested;
     bytes32 public pendingProposalRef;
     bytes32 public pendingGroundsHash;
 
     /// @notice Absolute expiry of the pending termination request. A request
     ///         governance neither fulfils nor cancels expires after
-    ///         {TERMINATION_REQUEST_WINDOW}, unblocking the beneficiary's
-    ///         {forfeit} so an abandoned request cannot suspend it forever.
+    ///         {TERMINATION_REQUEST_WINDOW}; once expired it no longer
+    ///         authorises {terminate}. An *active* request cannot be
+    ///         re-requested, so the window cannot be extended indefinitely
+    ///         by re-issuing requests.
     uint64 public terminationRequestDeadline;
 
     /// @notice How long a pending termination request stays valid. The DAO
-    ///         must fulfil it (or re-request) within this window.
+    ///         must fulfil it within this window; afterwards the request
+    ///         expires and may be replaced by a fresh one.
     uint64 public constant TERMINATION_REQUEST_WINDOW = 30 days;
 
     // ---------------------------------------------------------------------
@@ -77,6 +81,7 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     event Forfeited(uint256 unvestedReturnedToTreasury, uint64 endedAt);
     event TerminationRequested(bytes32 proposalRef, bytes32 groundsHash);
     event TerminationRequestCancelled();
+    event DelegateUpdated(address indexed previousDelegate, address indexed newDelegate);
 
     // ---------------------------------------------------------------------
     // Errors
@@ -95,7 +100,8 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     error OwnershipTransferDisabled();
     error EthNotSupported();
     error Underfunded(uint256 actual, uint256 expected);
-    error TerminationPending();
+    error DisclosedVestNonForfeitable();
+    error TerminationRequestActive();
     error NoTerminationRequest();
     error TerminationRefsMismatch();
     error TerminationRequestExpired();
@@ -141,10 +147,14 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         // wrapped sum silently produces a schedule that has already started.
         // Same uint256-space check.
         if (uint256(startTimestamp_) + uint256(cliffDuration_) > type(uint64).max) revert InvalidDuration();
-        // Only the deploying factory may initialize a clone. Clones are
-        // created and initialized atomically inside {createVest}, so this
-        // gate is defense-in-depth against any future caller.
-        if (msg.sender != factory_) revert NotFactory();
+        // NOTE: there is deliberately no caller check here. `factory_` is a
+        // caller-supplied argument, so `msg.sender == factory_` would be
+        // tautological for whoever initializes a bare clone and cannot
+        // authenticate the deploying factory on an EIP-1167 clone. The real
+        // protection is structural: clones are only ever funded and
+        // initialized atomically inside {BLOKCVestingFactory.createVest},
+        // and the factory's `isVest` registry gates every privileged
+        // interaction with a clone.
 
         uint64 totalDuration = cliffDuration_ + linearVestDuration_;
         __VestingWallet_init(beneficiary_, startTimestamp_, totalDuration);
@@ -246,13 +256,11 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     // Termination — DAO-initiated, factory-routed
     // ---------------------------------------------------------------------
 
-    /// @notice Reserve the termination path ahead of {terminate}. Called by
-    ///         the factory in a separate transaction so a pending DAO
-    ///         termination cannot be pre-empted by the beneficiary's
-    ///         {forfeit} — which would erase the {Terminated} event and its
-    ///         grounds hash from the on-chain record. Enforces the same
-    ///         guards as {terminate}; once pending, only the factory can
-    ///         {terminate} or {cancelTerminationRequest}.
+    /// @notice Reserve the termination path ahead of {terminate}, committing
+    ///         the proposal ref and grounds hash that {terminate} must later
+    ///         match. Disclosed vests cannot {forfeit} at all, so this
+    ///         reservation cannot be pre-empted. An active request cannot be
+    ///         replaced until it is fulfilled, cancelled, or expired.
     /// @param proposalRef Aragon proposal hash that authorised this request.
     /// @param groundsHash keccak of the published grounds text.
     function requestTermination(bytes32 proposalRef, bytes32 groundsHash) external onlyFactory {
@@ -260,6 +268,10 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         if (!terminationDisclosed) revert TerminationNotDisclosed();
         if (ended) revert AlreadyEnded();
         if (totalAtStart - _vestingSchedule(totalAtStart, uint64(block.timestamp)) == 0) revert AlreadyMatured();
+        // An active request cannot be re-requested: each call would
+        // otherwise push the deadline another full window out, negating the
+        // expiry. Expired requests may be replaced with fresh refs.
+        if (terminationRequested && block.timestamp <= terminationRequestDeadline) revert TerminationRequestActive();
 
         terminationRequested = true;
         terminationRequestDeadline = uint64(block.timestamp) + TERMINATION_REQUEST_WINDOW;
@@ -294,9 +306,9 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         if (!terminationDisclosed) revert TerminationNotDisclosed();
         if (ended) revert AlreadyEnded();
         // Termination requires a pending request: the two-step
-        // {requestTermination} → {terminate} flow is mandatory so the
-        // beneficiary cannot pre-empt a single-step termination with
-        // {forfeit} and erase the grounds-hash record.
+        // {requestTermination} → {terminate} flow commits the proposal ref
+        // and grounds hash before execution, and disclosed vests cannot
+        // {forfeit} at all, so the grounds record cannot be pre-empted.
         if (!terminationRequested) revert NoTerminationRequest();
         // The grounds pinned on-chain must be the ones the request committed
         // to; silently accepting different refs would void the anti-tamper
@@ -329,7 +341,7 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     }
 
     // ---------------------------------------------------------------------
-    // Voluntary forfeit — beneficiary initiated, builders only
+    // Voluntary forfeit — beneficiary initiated, non-disclosed builders only
     // ---------------------------------------------------------------------
 
     /// @notice Beneficiary-initiated end of the vest. Pre-cliff: full
@@ -344,19 +356,17 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     ///         Reverts post-maturity (all tokens already vested) to prevent
     ///         misleading forfeit events with unvested == 0.
     ///
-    ///         Reverts while a termination request is pending
-    ///         ({terminationRequested}) so the beneficiary cannot front-run a
-    ///         DAO termination and erase the grounds hash from the on-chain
-    ///         record.
+    ///         Reverts for disclosed (DAO-terminable) vests: a beneficiary
+    ///         forfeit could otherwise pre-empt a DAO termination and erase
+    ///         the grounds-hash record. Non-disclosed vests are not
+    ///         terminable, so forfeit stays available there as the only
+    ///         early exit.
     ///
     ///         On success, calls {IBLOKCVestingFactory.notifyForfeit} so the
     ///         factory emits a single-source-of-truth event for indexers.
     function forfeit() external onlyBeneficiary nonReentrant {
         if (prePaid) revert InvestorVestNonForfeitable();
-        // An *expired* request no longer blocks forfeit — a request that
-        // governance neither fulfilled nor cancelled within the window must
-        // not suspend the beneficiary's right forever.
-        if (terminationRequested && block.timestamp <= terminationRequestDeadline) revert TerminationPending();
+        if (terminationDisclosed) revert DisclosedVestNonForfeitable();
         if (ended) revert AlreadyEnded();
         if (totalAtStart - _vestingSchedule(totalAtStart, uint64(block.timestamp)) == 0) revert AlreadyMatured();
 
@@ -374,7 +384,7 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         // with the unvested portion, so donated tokens do not stay trapped.
         _sweepExcess();
 
-        IBLOKCVestingFactory(factory).notifyForfeit(unvested);
+        IBLOKCVestingFactory(factory).notifyForfeit();
 
         emit Forfeited(unvested, endTime);
     }
@@ -451,6 +461,21 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     ///         `_vestsByBeneficiary` registry authoritative.
     function transferOwnership(address) public view override {
         revert OwnershipTransferDisabled();
+    }
+
+    // ---------------------------------------------------------------------
+    // Governance delegation rotation
+    // ---------------------------------------------------------------------
+
+    /// @notice Re-delegates the vest's voting power to a new address. Only
+    ///         the beneficiary can call this. Emits {DelegateUpdated}.
+    ///         Reentrancy-guarded as defence-in-depth around the token's
+    ///         delegation hook.
+    function updateDelegate(address newDelegate) external onlyBeneficiary nonReentrant {
+        if (newDelegate == address(0)) revert ZeroAddress();
+        address previous = IVotes(token).delegates(address(this));
+        IVotes(token).delegate(newDelegate);
+        emit DelegateUpdated(previous, newDelegate);
     }
 
     // ---------------------------------------------------------------------

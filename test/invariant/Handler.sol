@@ -115,6 +115,9 @@ contract Handler is CommonBase, StdCheats, StdUtils {
     function forfeit(uint256 vestSeed) external {
         BLOKCVestingWallet vest = _pickVest(vestSeed);
         if (address(vest) == address(0)) return;
+        // Forfeit is non-disclosed builders only; disclosed vests are
+        // DAO-termination-only. Catch below still covers investor/matured.
+        if (vest.terminationDisclosed()) return;
 
         address ben = vest.owner();
         uint256 treasuryBefore = token.balanceOf(treasury);

@@ -259,11 +259,34 @@ contract BLOKCVestingFactory_TerminateVest is BaseTest {
         assertTrue(vest.ended());
     }
 
+    function test_terminateVestGuarded_eventMatchesBookkeeping() public {
+        // The event reuses the pre-call estimate; it must still equal the
+        // wallet's post-termination bookkeeping bit-for-bit (same block
+        // timestamp, curve capped at endedAt).
+        vm.warp(block.timestamp + CLIFF + LINEAR / 2);
+        vm.prank(governance);
+        factory.requestTermination(address(vest), bytes32("p"), bytes32("g"));
+
+        uint256 unvestedAmount = vest.totalAtStart() - vest.vested();
+        uint64 endTime = uint64(block.timestamp);
+
+        vm.expectEmit(true, false, false, true);
+        emit BLOKCVestingFactory.VestTerminated(address(vest), bytes32("p"), bytes32("g"), unvestedAmount, endTime);
+
+        vm.prank(governance);
+        factory.terminateVestGuarded(address(vest), bytes32("p"), bytes32("g"), 1, false, 0);
+
+        assertEq(unvestedAmount, vest.totalAtStart() - vest.vestedAmount(address(token), vest.endedAt()));
+    }
+
     function test_terminateVestGuarded_revertsWhenEnded() public {
         // Fail fast on an ended vest instead of letting the frozen curve
         // estimate pass minUnvested before the wallet rejects the call.
-        vm.prank(beneficiary);
-        vest.forfeit();
+        vm.prank(governance);
+        factory.requestTermination(address(vest), bytes32("p"), bytes32("g"));
+        vm.prank(governance);
+        factory.terminateVest(address(vest), bytes32("p"), bytes32("g"));
+
         vm.prank(governance);
         vm.expectRevert(BLOKCVestingFactory.AlreadyEnded.selector);
         factory.terminateVestGuarded(address(vest), bytes32("p"), bytes32("g"), 0, false, 0);
@@ -294,11 +317,12 @@ contract BLOKCVestingFactory_TerminateVest is BaseTest {
 contract BLOKCVestingFactory_NotifyForfeit is BaseTest {
     function test_notifyForfeit_revertsForUnregisteredCaller() public {
         vm.expectRevert(BLOKCVestingFactory.NotRegisteredVest.selector);
-        factory.notifyForfeit(123);
+        factory.notifyForfeit();
     }
 
     function test_notifyForfeit_emittedFromForfeit() public {
-        BLOKCVestingWallet vest = _defaultVest();
+        // Forfeit is non-disclosed builders only.
+        BLOKCVestingWallet vest = _createVest(beneficiary, DEFAULT_AMOUNT, uint64(block.timestamp), false, false);
         uint64 warpTo = uint64(block.timestamp) + CLIFF + LINEAR / 4;
         vm.warp(warpTo);
 

@@ -91,7 +91,6 @@ contract BLOKCVestingFactory is Ownable2Step {
     error DeadlineExceeded();
     error InsufficientUnvested();
     error AlreadyEnded();
-    error InvalidUnvestedAmount();
 
     // ---------------------------------------------------------------------
     // Constructor
@@ -221,13 +220,12 @@ contract BLOKCVestingFactory is Ownable2Step {
     /// @param proposalRef  Aragon proposal hash that authorised this call.
     /// @param groundsHash  keccak of the published grounds text.
     ///
-    ///         Anti-front-run guarantee: {requestTermination} must be called
-    ///         in a separate transaction first, with the same
-    ///         proposalRef/groundsHash passed here. The wallet rejects
-    ///         terminations without a pending request and terminations whose
-    ///         refs differ from the committed ones, so the beneficiary cannot
-    ///         pre-empt the termination with {forfeit} and erase the grounds
-    ///         hash from the on-chain record.
+    ///         Anti-front-run guarantee: disclosed (terminable) vests cannot
+    ///         {BLOKCVestingWallet.forfeit} at all, so the beneficiary can
+    ///         never pre-empt a termination with {forfeit} and erase the
+    ///         grounds hash from the on-chain record. The two-step
+    ///         {requestTermination} → {terminate} flow additionally commits
+    ///         refs that this call must match.
     function terminateVest(address vest, bytes32 proposalRef, bytes32 groundsHash) external onlyOwner {
         if (!isVest[vest]) revert NotRegisteredVest();
         BLOKCVestingWallet w = BLOKCVestingWallet(payable(vest));
@@ -281,12 +279,11 @@ contract BLOKCVestingFactory is Ownable2Step {
         uint256 unvested = w.totalAtStart() - w.vestedAmount(token, uint64(block.timestamp));
         if (unvested < minUnvested) revert InsufficientUnvested();
         w.terminate(proposalRef, groundsHash);
-        uint64 endTime = w.endedAt();
-        // Source the event's unvested from post-termination state (same
-        // pattern as {terminateVest}) so the event always reflects the
-        // wallet's actual bookkeeping, not a pre-call estimate.
-        unvested = w.totalAtStart() - w.vestedAmount(token, endTime);
-        emit VestTerminated(vest, proposalRef, groundsHash, unvested, endTime);
+        // The pre-call estimate is bit-identical to the wallet's
+        // post-termination bookkeeping: {terminate} pins `endedAt` to this
+        // same block.timestamp and vestedAmount caps at `endedAt`, so the
+        // event reuses it instead of paying for a redundant recompute.
+        emit VestTerminated(vest, proposalRef, groundsHash, unvested, w.endedAt());
     }
 
     // ---------------------------------------------------------------------
@@ -296,18 +293,15 @@ contract BLOKCVestingFactory is Ownable2Step {
     /// @notice Callback used by {BLOKCVestingWallet.forfeit} so the factory
     ///         emits a single-source-of-truth event for the dashboard /
     ///         indexer. msg.sender must be a clone deployed by this factory.
-    ///         The emitted amount is derived from the vest's own bookkeeping
-    ///         and cross-checked against the caller-supplied value, so a
-    ///         future code path (or corrupted clone) cannot forge the feed.
-    function notifyForfeit(uint256 unvestedAmount) external {
+    ///         The emitted amount is derived entirely from the vest's own
+    ///         bookkeeping — there is no caller-supplied value to trust or
+    ///         cross-check.
+    function notifyForfeit() external {
         if (!isVest[msg.sender]) revert NotRegisteredVest();
         BLOKCVestingWallet w = BLOKCVestingWallet(payable(msg.sender));
-        // A live vest reports endedAt() == 0 → vested 0 → computed unvested
-        // == totalAtStart, which no real forfeit amount can match — so this
-        // comparison also implies the vest actually ended.
-        uint256 unvested = w.totalAtStart() - w.vestedAmount(token, w.endedAt());
-        if (unvestedAmount != unvested) revert InvalidUnvestedAmount();
-        emit VestForfeited(msg.sender, unvested, w.endedAt());
+        uint64 endTime = w.endedAt();
+        uint256 unvested = w.totalAtStart() - w.vestedAmount(token, endTime);
+        emit VestForfeited(msg.sender, unvested, endTime);
     }
 
     // ---------------------------------------------------------------------
