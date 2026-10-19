@@ -107,6 +107,7 @@ contract BLOKCVestingFactoryFuzz is BaseTest {
             BLOKCVestingWallet v = BLOKCVestingWallet(payable(list[i]));
             if (((actionMask >> i) & 1) != 0) {
                 // best-effort release; harmless if claimable() == 0
+                vm.prank(beneficiary);
                 v.release(address(token));
             }
         }
@@ -114,6 +115,10 @@ contract BLOKCVestingFactoryFuzz is BaseTest {
         for (uint256 i; i < list.length; ++i) {
             BLOKCVestingWallet v = BLOKCVestingWallet(payable(list[i]));
             if (!v.prePaid() && v.isTerminationDisclosed() && !v.ended() && v.vested() < v.totalAtStart()) {
+                // The two-step flow is mandatory: request first with the same
+                // refs (same block, inside the request window).
+                vm.prank(governance);
+                factory.requestTermination(address(v), bytes32("p"), bytes32("g"));
                 vm.prank(governance);
                 factory.terminateVest(address(v), bytes32("p"), bytes32("g"));
                 break; // single termination is enough to exercise the ended branch

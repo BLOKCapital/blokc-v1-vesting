@@ -51,6 +51,21 @@ contract BLOKCVestingFactory_Constructor is BaseTest {
         assertEq(f.cliffDuration(), 0);
     }
 
+    function test_constructor_revertsOnDurationOverflow() public {
+        // cliff + linear must fit in uint64 — every vest's initialize sums
+        // them, and a wrapped total duration would never vest.
+        vm.expectRevert(BLOKCVestingFactory.InvalidDuration.selector);
+        new BLOKCVestingFactory(address(implementation), address(token), treasury, governance, type(uint64).max, 1);
+    }
+
+    function test_constructor_maxBoundaryDurationAllowed() public {
+        BLOKCVestingFactory f = new BLOKCVestingFactory(
+            address(implementation), address(token), treasury, governance, type(uint64).max - 1, 1
+        );
+        assertEq(f.cliffDuration(), type(uint64).max - 1);
+        assertEq(f.linearVestDuration(), 1);
+    }
+
     function test_constructor_revertsOnEOAImplementation() public {
         address eoa = makeAddr("eoa");
         vm.expectRevert(BLOKCVestingFactory.InvalidImplementation.selector);
@@ -63,7 +78,9 @@ contract BLOKCVestingFactory_CreateVest is BaseTest {
         uint64 startTs = uint64(block.timestamp);
 
         vm.expectEmit(false, true, false, true);
-        emit BLOKCVestingFactory.VestCreated(address(0), beneficiary, DEFAULT_AMOUNT, startTs, CLIFF, LINEAR, false, true);
+        emit BLOKCVestingFactory.VestCreated(
+            address(0), beneficiary, DEFAULT_AMOUNT, startTs, CLIFF, LINEAR, false, true
+        );
 
         vm.prank(governance);
         address vest = factory.createVest(beneficiary, DEFAULT_AMOUNT, startTs, false, true);
@@ -98,6 +115,24 @@ contract BLOKCVestingFactory_CreateVest is BaseTest {
         assertEq(token.getVotes(beneficiary), DEFAULT_AMOUNT);
     }
 
+    function test_createVest_revertsOnFullyElapsedStart() public {
+        // A start whose whole schedule has already elapsed (here the
+        // ABI-defaulted zero) would produce an instantly matured grant with
+        // the disclosed termination right void from block one.
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingFactory.AlreadyMatured.selector);
+        factory.createVest(beneficiary, DEFAULT_AMOUNT, 0, false, true);
+    }
+
+    function test_createVest_allowsBackdatedStartStillVesting() public {
+        // Backdating within the schedule stays allowed: the grant simply
+        // starts part-way through its curve, with termination still open.
+        uint64 startTs = uint64(block.timestamp) - CLIFF / 2;
+        vm.prank(governance);
+        address vest = factory.createVest(beneficiary, DEFAULT_AMOUNT, startTs, false, true);
+        assertEq(BLOKCVestingWallet(payable(vest)).start(), startTs);
+    }
+
     function test_createVest_revertsWhenNotOwner() public {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
         factory.createVest(beneficiary, DEFAULT_AMOUNT, uint64(block.timestamp), false, true);
@@ -113,6 +148,15 @@ contract BLOKCVestingFactory_CreateVest is BaseTest {
         vm.prank(governance);
         vm.expectRevert(BLOKCVestingFactory.ZeroAmount.selector);
         factory.createVest(beneficiary, 0, uint64(block.timestamp), false, true);
+    }
+
+    function test_createVest_revertsOnStartTimestampOverflow() public {
+        // startTimestamp + cliff is stored as a uint64 sum; a wrapped sum
+        // silently produces a schedule that has already started. The wallet's
+        // initialize rejects it, rolling back the whole creation.
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingWallet.InvalidDuration.selector);
+        factory.createVest(beneficiary, DEFAULT_AMOUNT, type(uint64).max - 1, false, true);
     }
 
     function test_createVest_revertsWhenTreasuryNotApproved() public {
@@ -172,11 +216,14 @@ contract BLOKCVestingFactory_TerminateVest is BaseTest {
     }
 
     function test_terminateVest_emitsAndForwards() public {
-        uint64 warpTo = uint64(block.timestamp) + CLIFF + LINEAR / 2;
-        vm.warp(warpTo);
-
         bytes32 proposalRef = keccak256("proposal");
         bytes32 groundsHash = keccak256("grounds");
+
+        // Request must be made within the 30-day window, so warp first.
+        uint64 warpTo = uint64(block.timestamp) + CLIFF + LINEAR / 2;
+        vm.warp(warpTo);
+        vm.prank(governance);
+        factory.requestTermination(address(vest), proposalRef, groundsHash);
 
         uint256 unvestedAmount = vest.totalAtStart() - vest.vested();
 
@@ -191,13 +238,18 @@ contract BLOKCVestingFactory_TerminateVest is BaseTest {
     }
 
     function test_terminateVestGuarded_revertsWhenPastCliff() public {
+        // Request must be made within the 30-day window, so warp first.
         vm.warp(block.timestamp + CLIFF + 1);
+        vm.prank(governance);
+        factory.requestTermination(address(vest), bytes32("p"), bytes32("g"));
         vm.prank(governance);
         vm.expectRevert(BLOKCVestingFactory.PastCliff.selector);
         factory.terminateVestGuarded(address(vest), bytes32("p"), bytes32("g"), 0, true, 0);
     }
 
     function test_terminateVestGuarded_revertsWhenPastDeadline() public {
+        vm.prank(governance);
+        factory.requestTermination(address(vest), bytes32("p"), bytes32("g"));
         uint64 deadline = uint64(block.timestamp) - 1;
         vm.prank(governance);
         vm.expectRevert(BLOKCVestingFactory.DeadlineExceeded.selector);
@@ -205,7 +257,10 @@ contract BLOKCVestingFactory_TerminateVest is BaseTest {
     }
 
     function test_terminateVestGuarded_revertsWhenInsufficientUnvested() public {
+        // Request must be made within the 30-day window, so warp first.
         vm.warp(block.timestamp + CLIFF + LINEAR / 2);
+        vm.prank(governance);
+        factory.requestTermination(address(vest), bytes32("p"), bytes32("g"));
         uint256 unvested = vest.totalAtStart() - vest.vested();
         vm.prank(governance);
         vm.expectRevert(BLOKCVestingFactory.InsufficientUnvested.selector);
@@ -214,21 +269,78 @@ contract BLOKCVestingFactory_TerminateVest is BaseTest {
 
     function test_terminateVestGuarded_happyPath_preCliff() public {
         // Terminates pre-cliff with full unvested balance.
+        vm.prank(governance);
+        factory.requestTermination(address(vest), bytes32("p"), bytes32("g"));
         uint256 unvested = vest.totalAtStart(); // pre-cliff: all unvested
         vm.prank(governance);
         factory.terminateVestGuarded(address(vest), bytes32("p"), bytes32("g"), unvested, true, 0);
         assertTrue(vest.ended());
+    }
+
+    function test_terminateVestGuarded_eventMatchesBookkeeping() public {
+        // The event reuses the pre-call estimate; it must still equal the
+        // wallet's post-termination bookkeeping bit-for-bit (same block
+        // timestamp, curve capped at endedAt).
+        vm.warp(block.timestamp + CLIFF + LINEAR / 2);
+        vm.prank(governance);
+        factory.requestTermination(address(vest), bytes32("p"), bytes32("g"));
+
+        uint256 unvestedAmount = vest.totalAtStart() - vest.vested();
+        uint64 endTime = uint64(block.timestamp);
+
+        vm.expectEmit(true, false, false, true);
+        emit BLOKCVestingFactory.VestTerminated(address(vest), bytes32("p"), bytes32("g"), unvestedAmount, endTime);
+
+        vm.prank(governance);
+        factory.terminateVestGuarded(address(vest), bytes32("p"), bytes32("g"), 1, false, 0);
+
+        assertEq(unvestedAmount, vest.totalAtStart() - vest.vestedAmount(address(token), vest.endedAt()));
+    }
+
+    function test_terminateVestGuarded_revertsWhenEnded() public {
+        // Fail fast on an ended vest instead of letting the frozen curve
+        // estimate pass minUnvested before the wallet rejects the call.
+        vm.prank(governance);
+        factory.requestTermination(address(vest), bytes32("p"), bytes32("g"));
+        vm.prank(governance);
+        factory.terminateVest(address(vest), bytes32("p"), bytes32("g"));
+
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingFactory.AlreadyEnded.selector);
+        factory.terminateVestGuarded(address(vest), bytes32("p"), bytes32("g"), 0, false, 0);
+    }
+
+    function test_terminateVest_revertsForUnregisteredVest() public {
+        address notAVest = makeAddr("notAVest");
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingFactory.NotRegisteredVest.selector);
+        factory.terminateVest(notAVest, bytes32("p"), bytes32("g"));
+    }
+
+    function test_terminateVestGuarded_revertsForUnregisteredVest() public {
+        address notAVest = makeAddr("notAVest");
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingFactory.NotRegisteredVest.selector);
+        factory.terminateVestGuarded(notAVest, bytes32("p"), bytes32("g"), 0, false, 0);
+    }
+
+    function test_requestTermination_revertsForUnregisteredVest() public {
+        address notAVest = makeAddr("notAVest");
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingFactory.NotRegisteredVest.selector);
+        factory.requestTermination(notAVest, bytes32("p"), bytes32("g"));
     }
 }
 
 contract BLOKCVestingFactory_NotifyForfeit is BaseTest {
     function test_notifyForfeit_revertsForUnregisteredCaller() public {
         vm.expectRevert(BLOKCVestingFactory.NotRegisteredVest.selector);
-        factory.notifyForfeit(123);
+        factory.notifyForfeit();
     }
 
     function test_notifyForfeit_emittedFromForfeit() public {
-        BLOKCVestingWallet vest = _defaultVest();
+        // Forfeit is non-disclosed builders only.
+        BLOKCVestingWallet vest = _createVest(beneficiary, DEFAULT_AMOUNT, uint64(block.timestamp), false, false);
         uint64 warpTo = uint64(block.timestamp) + CLIFF + LINEAR / 4;
         vm.warp(warpTo);
 
@@ -292,6 +404,7 @@ contract BLOKCVestingFactory_UnclaimedAllocation is BaseTest {
         vm.warp(block.timestamp + CLIFF + LINEAR / 2); // ~62.5% vested
 
         uint256 expectedVested = vest.vested();
+        vm.prank(beneficiary);
         vest.release(address(token));
 
         assertEq(factory.unclaimedAllocation(beneficiary), DEFAULT_AMOUNT - expectedVested);

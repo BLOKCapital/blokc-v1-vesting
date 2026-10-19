@@ -10,7 +10,7 @@ contract BLOKCVestingWalletFuzz is BaseTest {
     uint64 internal constant MAX_CLIFF = 5 * 365 days;
     uint64 internal constant MAX_LINEAR = 10 * 365 days;
 
-    function _deployWith(uint64 cliff, uint64 linear, uint256 amount, uint64 startTs)
+    function _deployWith(uint64 cliff, uint64 linear, uint256 amount, uint64 startTs, bool disclosed)
         internal
         returns (BLOKCVestingWallet vest)
     {
@@ -30,7 +30,7 @@ contract BLOKCVestingWalletFuzz is BaseTest {
         vm.prank(treasury);
         token.approve(address(f), type(uint256).max);
         vm.prank(governance);
-        vest = BLOKCVestingWallet(payable(f.createVest(beneficiary, amount, startTs, false, true)));
+        vest = BLOKCVestingWallet(payable(f.createVest(beneficiary, amount, startTs, false, disclosed)));
     }
 
     /// @notice Vested amount is bounded: 0 ≤ vested ≤ totalAmount, always.
@@ -40,7 +40,7 @@ contract BLOKCVestingWalletFuzz is BaseTest {
         linear = uint64(bound(linear, 1, MAX_LINEAR));
 
         uint64 startTs = uint64(block.timestamp);
-        BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs);
+        BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs, true);
 
         // Sample a timestamp within ±2*total around start.
         uint64 total = cliff + linear;
@@ -65,7 +65,7 @@ contract BLOKCVestingWalletFuzz is BaseTest {
         linear = uint64(bound(linear, 1, MAX_LINEAR));
 
         uint64 startTs = uint64(block.timestamp);
-        BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs);
+        BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs, true);
 
         uint64 total = cliff + linear;
         t1 = uint64(bound(t1, startTs, uint256(startTs) + 2 * uint256(total)));
@@ -84,7 +84,7 @@ contract BLOKCVestingWalletFuzz is BaseTest {
         fraction = bound(fraction, 0, uint256(cliff) - 1);
 
         uint64 startTs = uint64(block.timestamp);
-        BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs);
+        BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs, true);
 
         assertEq(vest.vestedAmount(address(token), uint64(uint256(startTs) + fraction)), 0);
     }
@@ -97,7 +97,7 @@ contract BLOKCVestingWalletFuzz is BaseTest {
         extra = uint64(bound(extra, 0, type(uint32).max));
 
         uint64 startTs = uint64(block.timestamp);
-        BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs);
+        BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs, true);
 
         uint64 ts = uint64(uint256(startTs) + uint256(cliff) + uint256(linear) + uint256(extra));
         assertEq(vest.vestedAmount(address(token), ts), amount);
@@ -115,15 +115,19 @@ contract BLOKCVestingWalletFuzz is BaseTest {
         elapsed = bound(elapsed, 0, uint256(total) - 1);
 
         uint64 startTs = uint64(block.timestamp);
-        BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs);
+        BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs, true);
 
         vm.warp(uint256(startTs) + elapsed);
 
         uint256 vestedBefore = vest.vested();
         uint256 treasuryBefore = token.balanceOf(treasury);
 
-        // Terminate via the registered factory of this clone.
+        // Terminate via the registered factory of this clone. The two-step
+        // flow is mandatory: request first, then terminate with the same refs
+        // (request and terminate share the warped block, inside the window).
         address f = vest.factory();
+        vm.prank(governance);
+        BLOKCVestingFactoryFresh(f).requestTermination(address(vest), bytes32("p"), bytes32("g"));
         vm.prank(governance);
         BLOKCVestingFactoryFresh(f).terminateVest(address(vest), bytes32("p"), bytes32("g"));
 
@@ -143,7 +147,8 @@ contract BLOKCVestingWalletFuzz is BaseTest {
         elapsed = bound(elapsed, 0, uint256(total) - 1);
 
         uint64 startTs = uint64(block.timestamp);
-        BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs);
+        // Forfeit is non-disclosed builders only.
+        BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs, false);
         vm.warp(uint256(startTs) + elapsed);
 
         uint256 vestedBefore = vest.vested();
@@ -165,14 +170,14 @@ contract BLOKCVestingWalletFuzz is BaseTest {
         step = uint64(bound(step, 1 days, 90 days));
 
         uint64 startTs = uint64(block.timestamp);
-        BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs);
+        BLOKCVestingWallet vest = _deployWith(cliff, linear, amount, startTs, true);
 
         uint256 totalDuration = uint256(cliff) + uint256(linear);
         uint256 elapsed;
         uint256 paid;
         while (elapsed <= totalDuration) {
             vm.warp(uint256(startTs) + elapsed);
-            vm.prank(alice); // anyone can call; beneficiary receives
+            vm.prank(beneficiary); // release is beneficiary-only
             vest.release(address(token));
             paid = token.balanceOf(beneficiary);
             // vest.vested() reads block.timestamp inside the wallet — avoids
@@ -183,6 +188,7 @@ contract BLOKCVestingWalletFuzz is BaseTest {
         }
         // After end, the full amount should have been paid out.
         vm.warp(uint256(startTs) + totalDuration + 1);
+        vm.prank(beneficiary);
         vest.release(address(token));
         assertEq(token.balanceOf(beneficiary), amount);
     }
