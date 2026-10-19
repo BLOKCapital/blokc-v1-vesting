@@ -115,6 +115,24 @@ contract BLOKCVestingFactory_CreateVest is BaseTest {
         assertEq(token.getVotes(beneficiary), DEFAULT_AMOUNT);
     }
 
+    function test_createVest_revertsOnFullyElapsedStart() public {
+        // A start whose whole schedule has already elapsed (here the
+        // ABI-defaulted zero) would produce an instantly matured grant with
+        // the disclosed termination right void from block one.
+        vm.prank(governance);
+        vm.expectRevert(BLOKCVestingFactory.AlreadyMatured.selector);
+        factory.createVest(beneficiary, DEFAULT_AMOUNT, 0, false, true);
+    }
+
+    function test_createVest_allowsBackdatedStartStillVesting() public {
+        // Backdating within the schedule stays allowed: the grant simply
+        // starts part-way through its curve, with termination still open.
+        uint64 startTs = uint64(block.timestamp) - CLIFF / 2;
+        vm.prank(governance);
+        address vest = factory.createVest(beneficiary, DEFAULT_AMOUNT, startTs, false, true);
+        assertEq(BLOKCVestingWallet(payable(vest)).start(), startTs);
+    }
+
     function test_createVest_revertsWhenNotOwner() public {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
         factory.createVest(beneficiary, DEFAULT_AMOUNT, uint64(block.timestamp), false, true);

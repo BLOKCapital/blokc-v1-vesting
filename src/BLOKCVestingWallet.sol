@@ -81,7 +81,12 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     event Forfeited(uint256 unvestedReturnedToTreasury, uint64 endedAt);
     event TerminationRequested(bytes32 proposalRef, bytes32 groundsHash);
     event TerminationRequestCancelled();
-    event DelegateUpdated(address indexed previousDelegate, address indexed newDelegate);
+    /// @notice A balance above the curve-tracked remainder (donation or forced
+    ///         transfer) was swept back to the treasury. Emitted on the init,
+    ///         release, forfeit, terminate and recoverSurplus sweeps so
+    ///         indexers can reconcile the exact treasury inflow — the frozen
+    ///         Terminated/Forfeited amounts cover only the curve.
+    event SurplusSwept(uint256 amount);
 
     // ---------------------------------------------------------------------
     // Errors
@@ -147,14 +152,25 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
         // wrapped sum silently produces a schedule that has already started.
         // Same uint256-space check.
         if (uint256(startTimestamp_) + uint256(cliffDuration_) > type(uint64).max) revert InvalidDuration();
-        // NOTE: there is deliberately no caller check here. `factory_` is a
-        // caller-supplied argument, so `msg.sender == factory_` would be
-        // tautological for whoever initializes a bare clone and cannot
-        // authenticate the deploying factory on an EIP-1167 clone. The real
-        // protection is structural: clones are only ever funded and
-        // initialized atomically inside {BLOKCVestingFactory.createVest},
-        // and the factory's `isVest` registry gates every privileged
-        // interaction with a clone.
+        // The schedule end (start + cliff + linear) must fit in uint64 too:
+        // `end()` is computed in uint256, so a wrapped end can never be
+        // reached by any real timestamp and the vest would never mature — a
+        // permanent lock for investor (prePaid) vests, whose forfeit and
+        // terminate paths are both disabled.
+        if (uint256(startTimestamp_) + uint256(cliffDuration_) + uint256(linearVestDuration_) > type(uint64).max) {
+            revert InvalidDuration();
+        }
+        // Bind the initializer to the factory the clone advertises: without
+        // this, anyone can clone the implementation and initialize it with
+        // the canonical factory's address, producing a look-alike vest whose
+        // `factory()` and lifecycle events point at the real factory (the
+        // factory itself only ever initializes clones it deploys atomically
+        // inside createVest, so it cannot be the source of such a clone).
+        // Bare clones are still possible — they simply name their own
+        // initializer as `factory_`. The factory's `isVest` registry
+        // independently gates every privileged interaction with the
+        // canonical factory.
+        if (msg.sender != factory_) revert NotFactory();
 
         uint64 totalDuration = cliffDuration_ + linearVestDuration_;
         __VestingWallet_init(beneficiary_, startTimestamp_, totalDuration);
@@ -184,6 +200,7 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     function _sweepSurplusOrRevert(address token_, address treasury_, uint256 expected) internal {
         uint256 bal = IERC20(token_).balanceOf(address(this));
         if (bal > expected) {
+            emit SurplusSwept(bal - expected);
             IERC20(token_).safeTransfer(treasury_, bal - expected);
             // Re-check after the sweep: a fee-on-transfer token that taxes
             // the sweep transfer would otherwise leave the wallet short of
@@ -207,6 +224,7 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
             ended ? _vestingSchedule(totalAtStart, endedAt) - released(token) : totalAtStart - released(token);
         uint256 bal = IERC20(token).balanceOf(address(this));
         if (bal > expected) {
+            emit SurplusSwept(bal - expected);
             IERC20(token).safeTransfer(treasury, bal - expected);
         }
     }
@@ -461,21 +479,6 @@ contract BLOKCVestingWallet is VestingWalletCliffUpgradeable, ReentrancyGuard {
     ///         `_vestsByBeneficiary` registry authoritative.
     function transferOwnership(address) public view override {
         revert OwnershipTransferDisabled();
-    }
-
-    // ---------------------------------------------------------------------
-    // Governance delegation rotation
-    // ---------------------------------------------------------------------
-
-    /// @notice Re-delegates the vest's voting power to a new address. Only
-    ///         the beneficiary can call this. Emits {DelegateUpdated}.
-    ///         Reentrancy-guarded as defence-in-depth around the token's
-    ///         delegation hook.
-    function updateDelegate(address newDelegate) external onlyBeneficiary nonReentrant {
-        if (newDelegate == address(0)) revert ZeroAddress();
-        address previous = IVotes(token).delegates(address(this));
-        IVotes(token).delegate(newDelegate);
-        emit DelegateUpdated(previous, newDelegate);
     }
 
     // ---------------------------------------------------------------------

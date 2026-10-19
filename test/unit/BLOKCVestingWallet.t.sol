@@ -63,9 +63,10 @@ contract BLOKCVestingWallet_Initialize is BaseTest {
         uint64 cliff_,
         uint64 linear_
     ) internal {
-        // initialize has no caller restriction (`factory_` is just a
-        // caller-supplied parameter); the tests below exercise every guard
-        // directly.
+        // initialize binds msg.sender to `factory_`; all guard tests below
+        // revert before that caller-binding check runs, so they can call it
+        // directly without pranking the factory (the binding itself is
+        // covered by its own test).
         vest.initialize(
             factory_, token_, treasury_, beneficiary_, uint64(block.timestamp), cliff_, linear_, false, true, 1 ether
         );
@@ -88,6 +89,35 @@ contract BLOKCVestingWallet_Initialize is BaseTest {
             true,
             1 ether
         );
+    }
+
+    function test_initialize_revertsOnEndOverflow() public {
+        // The full schedule end (start + cliff + linear) must also fit in
+        // uint64; a wrapped end is unreachable by any timestamp, so the vest
+        // would never mature — a permanent lock for prePaid vests.
+        BLOKCVestingWallet vest = _fresh();
+        vm.expectRevert(BLOKCVestingWallet.InvalidDuration.selector);
+        _init(vest, address(factory), address(token), treasury, beneficiary, 0, type(uint64).max);
+    }
+
+    function test_initialize_revertsWhenCallerIsNotTheFactory() public {
+        // The clone's advertised factory must be its initializer: this is
+        // what stops impostor clones from copying the canonical factory's
+        // address and forging its lifecycle feed.
+        BLOKCVestingWallet vest = _fresh();
+        vm.expectRevert(BLOKCVestingWallet.NotFactory.selector);
+        _init(vest, address(factory), address(token), treasury, beneficiary, CLIFF, LINEAR);
+    }
+
+    function test_initialize_allowsSelfDeclaredFactory() public {
+        // Bare clones stay permissionless: any initializer may name itself
+        // as the clone's factory — it just cannot claim someone else's.
+        BLOKCVestingWallet vest = _fresh();
+        token.mint(address(vest), 1 ether);
+        vm.prank(alice);
+        _init(vest, alice, address(token), treasury, beneficiary, CLIFF, LINEAR);
+        assertEq(vest.factory(), alice);
+        assertEq(vest.owner(), beneficiary);
     }
 
     function test_initialize_revertsOnZeroFactory() public {
@@ -139,6 +169,7 @@ contract BLOKCVestingWallet_Initialize is BaseTest {
         vm.prank(treasury);
         feeToken.transfer(address(vest), 1 ether); // 1% fee → vest holds 0.99 ether
 
+        vm.prank(address(factory)); // initialize is sender-bound; fail on funding, not caller
         vm.expectRevert(abi.encodeWithSelector(BLOKCVestingWallet.Underfunded.selector, 0.99 ether, 1 ether));
         vest.initialize(
             address(factory),
@@ -664,6 +695,8 @@ contract BLOKCVestingWallet_Release is BaseTest {
 
         vm.warp(startTs + CLIFF + LINEAR);
         uint256 treasuryBefore = token.balanceOf(treasury);
+        vm.expectEmit(false, false, false, true, address(vest));
+        emit BLOKCVestingWallet.SurplusSwept(100 ether);
         vm.prank(beneficiary);
         vest.release(address(token));
 
@@ -684,6 +717,20 @@ contract BLOKCVestingWallet_Release is BaseTest {
         assertEq(token.balanceOf(treasury), treasuryBefore + 100 ether);
         assertEq(token.balanceOf(address(vest)), DEFAULT_AMOUNT);
         assertEq(token.getVotes(beneficiary), DEFAULT_AMOUNT, "votes back to promised allocation");
+    }
+
+    function test_recoverSurplus_emitsSurplusSwept() public {
+        // Indexers reconcile treasury inflow from this event: the frozen
+        // Terminated/Forfeited amounts only cover the curve, not the sweep.
+        token.mint(alice, 100 ether);
+        vm.prank(alice);
+        token.transfer(address(vest), 100 ether);
+
+        vm.expectEmit(false, false, false, true, address(vest));
+        emit BLOKCVestingWallet.SurplusSwept(100 ether);
+
+        vm.prank(bob); // anyone
+        vest.recoverSurplus();
     }
 
     function test_release_destroysVotesWithoutSelfDelegation() public {
@@ -811,59 +858,5 @@ contract BLOKCVestingWallet_Views is BaseTest {
         vm.prank(beneficiary);
         vest.release(address(token));
         assertEq(vest.unclaimedAllocation(), 0);
-    }
-}
-
-contract BLOKCVestingWallet_UpdateDelegate is BaseTest {
-    BLOKCVestingWallet internal vest;
-
-    function setUp() public override {
-        super.setUp();
-        vest = _defaultVest();
-    }
-
-    function test_updateDelegate_onlyBeneficiary() public {
-        vm.expectRevert(BLOKCVestingWallet.NotBeneficiary.selector);
-        vm.prank(alice);
-        vest.updateDelegate(alice);
-    }
-
-    function test_updateDelegate_revertsOnZeroAddress() public {
-        vm.prank(beneficiary);
-        vm.expectRevert(BLOKCVestingWallet.ZeroAddress.selector);
-        vest.updateDelegate(address(0));
-    }
-
-    function test_updateDelegate_changesDelegate() public {
-        assertEq(token.delegates(address(vest)), beneficiary);
-
-        vm.expectEmit(true, true, false, false, address(vest));
-        emit BLOKCVestingWallet.DelegateUpdated(beneficiary, alice);
-
-        vm.prank(beneficiary);
-        vest.updateDelegate(alice);
-
-        assertEq(token.delegates(address(vest)), alice);
-        assertEq(token.getVotes(alice), DEFAULT_AMOUNT);
-        assertEq(token.getVotes(beneficiary), 0);
-    }
-
-    function test_updateDelegate_survivesRestOfLifecycle() public {
-        // Rotation is sticky: release/terminate do not re-point delegation.
-        BLOKCVestingWallet disclosed = _defaultVest();
-        vm.prank(beneficiary);
-        disclosed.updateDelegate(alice);
-        assertEq(token.delegates(address(disclosed)), alice);
-
-        vm.warp(uint64(block.timestamp) + CLIFF + LINEAR / 2);
-        vm.prank(beneficiary);
-        disclosed.release(address(token));
-        assertEq(token.delegates(address(disclosed)), alice);
-
-        vm.prank(governance);
-        factory.requestTermination(address(disclosed), bytes32("p"), bytes32("g"));
-        vm.prank(governance);
-        factory.terminateVest(address(disclosed), bytes32("p"), bytes32("g"));
-        assertEq(token.delegates(address(disclosed)), alice);
     }
 }

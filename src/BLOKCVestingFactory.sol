@@ -91,6 +91,7 @@ contract BLOKCVestingFactory is Ownable2Step {
     error DeadlineExceeded();
     error InsufficientUnvested();
     error AlreadyEnded();
+    error AlreadyMatured();
 
     // ---------------------------------------------------------------------
     // Constructor
@@ -149,6 +150,15 @@ contract BLOKCVestingFactory is Ownable2Step {
     ) external onlyOwner returns (address vest) {
         if (beneficiary == address(0)) revert ZeroAddress();
         if (totalAmount == 0) revert ZeroAmount();
+        // A start so far in the past that the whole schedule has already
+        // elapsed (e.g. an ABI-defaulted zero or a stale proposal input)
+        // would create an instantly and fully matured grant: the wallet's
+        // maturity guards close terminate/forfeit from the first block and
+        // the disclosed termination right is void before it can ever be
+        // used. Backdated starts that still leave vesting ahead are allowed.
+        if (uint256(startTimestamp) + uint256(cliffDuration) + uint256(linearVestDuration) <= block.timestamp) {
+            revert AlreadyMatured();
+        }
 
         vest = Clones.clone(implementation);
 
@@ -185,6 +195,7 @@ contract BLOKCVestingFactory is Ownable2Step {
                     || w.terminationDisclosed() != terminationDisclosed || w.start() != startTimestamp
                     || w.cliff() != uint256(startTimestamp) + uint256(cliffDuration)
                     || w.duration() != uint256(cliffDuration) + uint256(linearVestDuration) || w.ended()
+                    || w.end() > type(uint64).max
             ) revert InvalidImplementation();
         }
 
